@@ -490,16 +490,6 @@ const BPF_LINK_TYPE_TRACING: u32 = 2;
 const BPF_LSM_MAC: u32 = 27;
 const BPF_PROG_TYPE_LSM: u32 = 29;
 
-/// strncmp() of a kernel object's name and an expected one, over the
-/// BPF_OBJ_NAME_LEN - 1 bytes the kernel keeps: whether they agree.
-fn name_is(name: &[u8], expected: &CStr) -> bool {
-    let expected = expected.to_bytes();
-    let n = OBJ_NAME_LEN - 1;
-    let a = cstr(&name[..n]);
-    let b = &expected[..expected.len().min(n)];
-    a == b
-}
-
 fn obj_name(info: &[u8], off: usize) -> &[u8] {
     &info[off..off + OBJ_NAME_LEN]
 }
@@ -526,8 +516,7 @@ fn guard_map_ids() -> Result<[u32; GUARD_MAP_COUNT], c_int> {
                     && info.u32_at(MAP_VALUE_SIZE) == def.value_size
                     && info.u32_at(MAP_MAX_ENTRIES) == def.max_entries
                     && info.u32_at(MAP_FLAGS) == def.flags
-                    && name[OBJ_NAME_LEN - 1] == 0
-                    && name_is(name, def.name);
+                    && identity::guard_name_matches(name, def.name);
                 if ok { 0 } else { -EPROTO }
             }
         };
@@ -566,10 +555,9 @@ fn guard_program_maps(map_ids: &[u32], expected: &[u32; GUARD_MAP_COUNT]) -> c_i
             return e;
         }
         let name = obj_name(info.bytes(), MAP_NAME);
-        let mismatch = GUARD_MAPS
-            .iter()
-            .zip(expected)
-            .any(|(m, &want)| name_is(name, m.def.name) && info.u32_at(MAP_ID) != want);
+        let mismatch = GUARD_MAPS.iter().zip(expected).any(|(m, &want)| {
+            identity::guard_name_matches(name, m.def.name) && info.u32_at(MAP_ID) != want
+        });
         if mismatch {
             return -EPROTO;
         }
@@ -649,7 +637,7 @@ fn guard_link(guard: &ImageGuard, maps: &[u32; GUARD_MAP_COUNT], kernel: &mut Ke
         || obj_id == 0
         || program.u32_at(PROG_ID) != link.u32_at(LINK_PROG_ID)
         || nr_maps > MAX_PROG_MAPS
-        || !name_is(obj_name(program.bytes(), PROG_NAME), guard.prog)
+        || !identity::guard_name_matches(obj_name(program.bytes(), PROG_NAME), guard.prog)
         || link.u32_at(LINK_TARGET_OBJ_ID) != obj_id
         || link.u32_at(LINK_TARGET_BTF_ID) != btf_id
     {

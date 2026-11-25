@@ -17,6 +17,20 @@ pub(crate) const IDENTITY_PIN: &CStr = c"/run/shirudo/bpffs/identity";
 /// PR_GET_ENFORCEMENT and PR_ENFORCING_ERR of include/shirudo/enforcement.h.
 const PR_GET_ENFORCEMENT: c_int = 0x5352_0001;
 const PR_ENFORCING_ERR: c_int = 1002;
+/// Whether a 16-byte kernel BPF object name is the complete expected
+/// name, or the kernel's 15-byte truncation of it.
+pub(crate) fn guard_name_matches(name: &[u8], expected: &CStr) -> bool {
+    let Some(name) = name.get(..16) else {
+        return false;
+    };
+    let Some(len) = name.iter().position(|&c| c == 0) else {
+        return false;
+    };
+    let expected = expected.to_bytes();
+    let expected_len = expected.len().min(15);
+
+    len == expected_len && name[..len] == expected[..expected_len]
+}
 
 /// Whether this boot enforces, as the kernel's prctl answers: 1, 0 for a
 /// kernel that does not know the question, or -errno.
@@ -70,4 +84,48 @@ fn lookup(fd: c_int, out: &mut Identity) -> c_int {
         return -errno();
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guard_name_matches;
+
+    fn kernel_name(raw: &[u8]) -> [u8; 16] {
+        let mut name = [0u8; 16];
+        name[..raw.len()].copy_from_slice(raw);
+        name
+    }
+
+    #[test]
+    fn kernel_name_is_the_start_of_a_long_one() {
+        let name = kernel_name(b"shirudo_bpffs_s");
+
+        assert!(guard_name_matches(&name, c"shirudo_bpffs_sb"));
+        assert!(guard_name_matches(&name, c"shirudo_bpffs_s"));
+        assert!(guard_name_matches(&name, c"shirudo_bpffs_s_and_more"));
+        assert!(!guard_name_matches(&name, c"shirudo_bpffs_"));
+        assert!(!guard_name_matches(&name, c"shirudo_bpffs_x"));
+        assert!(!guard_name_matches(&name, c""));
+    }
+
+    #[test]
+    fn short_name_is_the_whole_one() {
+        let name = kernel_name(b"shirudo_tasks");
+
+        assert!(guard_name_matches(&name, c"shirudo_tasks"));
+        assert!(!guard_name_matches(&name, c"shirudo_task"));
+        assert!(!guard_name_matches(&name, c"shirudo_tasks_"));
+        assert!(!guard_name_matches(&name, c"shirudo_task_policy"));
+        assert!(!guard_name_matches(&name, c"SHIRUDO_TASKS"));
+    }
+
+    #[test]
+    fn unterminated_name_matches_nothing() {
+        let name = [b'x'; 16];
+
+        assert!(!guard_name_matches(&name, c"xxxxxxxxxxxxxxx"));
+        assert!(!guard_name_matches(&name, c"xxxxxxxxxxxxxxxx"));
+        assert!(guard_name_matches(&[0; 16], c""));
+        assert!(!guard_name_matches(&[0; 16], c"x"));
+    }
 }
