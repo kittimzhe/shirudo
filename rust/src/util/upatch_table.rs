@@ -19,13 +19,16 @@ pub struct UpatchTableRow {
     pub(crate) loaded_at: [c_char; 32],
     pub(crate) status: [c_char; 64],
     pub(crate) n_maps: u32,
+    pub(crate) missed_ret: i32,
+    pub(crate) missed_counted: u32,
+    pub(crate) missed_runs: u64,
     pub(crate) age_sec: i64,
     pub(crate) payload_sha256: [c_char; 65],
 }
 
-const _: () = assert!(size_of::<UpatchTableRow>() == 600);
+const _: () = assert!(size_of::<UpatchTableRow>() == 616);
 const _: () = assert!(core::mem::offset_of!(UpatchTableRow, n_maps) == 516);
-const _: () = assert!(core::mem::offset_of!(UpatchTableRow, payload_sha256) == 528);
+const _: () = assert!(core::mem::offset_of!(UpatchTableRow, payload_sha256) == 544);
 
 /// The string in a fixed array, up to its NUL.
 fn in_array(a: &[c_char]) -> &[u8] {
@@ -61,7 +64,7 @@ pub(crate) unsafe fn age_sec(ts: *const c_char) -> i64 {
 
 /// The rows as `shirudo status` prints them.
 pub(crate) fn print(rows: &[UpatchTableRow]) {
-    let row = c"  %-24s  %-28s  %5u  %-28s  %s\n";
+    let row = c"  %-24s  %-28s  %5u  %6s  %-28s  %s\n";
 
     // SAFETY: a format of an unsigned long, and its count.
     unsafe { printf(c"\nLoaded upatches (%zu):\n".as_ptr(), rows.len()) };
@@ -73,10 +76,11 @@ pub(crate) fn print(rows: &[UpatchTableRow]) {
     // SAFETY: a format of five C strings, and those.
     unsafe {
         printf(
-            c"  %-24s  %-28s  %5s  %-28s  %s\n".as_ptr(),
+            c"  %-24s  %-28s  %5s  %6s  %-28s  %s\n".as_ptr(),
             c"NAME".as_ptr(),
             c"LOCATION".as_ptr(),
             c"MAPS".as_ptr(),
+            c"MISSED".as_ptr(),
             c"STATUS".as_ptr(),
             c"AGE".as_ptr(),
         )
@@ -98,6 +102,16 @@ pub(crate) fn print(rows: &[UpatchTableRow]) {
         } else {
             c"success".as_ptr()
         };
+        let mut missed = [0u8; 24];
+        let missed_text = if r.missed_ret != 0 {
+            c"?".as_ptr()
+        } else if r.missed_counted == 0 {
+            c"-".as_ptr()
+        } else {
+            let digits = r.missed_runs.to_string();
+            missed[..digits.len()].copy_from_slice(digits.as_bytes());
+            missed.as_ptr().cast()
+        };
 
         // SAFETY: the format, the row's strings, which its arrays end,
         // its count of maps, and the age.
@@ -107,6 +121,7 @@ pub(crate) fn print(rows: &[UpatchTableRow]) {
                 r.name.as_ptr(),
                 location,
                 r.n_maps,
+                missed_text,
                 status,
                 age.as_ptr(),
             )
@@ -129,6 +144,11 @@ pub(crate) fn emit_json(e: &mut JsonEmit, rows: &[UpatchTableRow]) {
         e.kv_string(b"location", in_array(&r.location));
         e.kv_string(b"status", status);
         e.kv_int(b"n_maps", i64::from(r.n_maps));
+        if r.missed_ret == 0 && r.missed_counted != 0 {
+            e.kv_u64(b"missed_runs", r.missed_runs);
+        } else {
+            e.kv_null(b"missed_runs");
+        }
         e.kv_string(b"loaded_at", in_array(&r.loaded_at));
         if r.age_sec >= 0 {
             e.kv_int(b"age_sec", r.age_sec);
@@ -143,4 +163,50 @@ pub(crate) fn emit_json(e: &mut JsonEmit, rows: &[UpatchTableRow]) {
         e.obj_close();
     }
     e.arr_close();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_distinguishes_counted_misses_from_unavailable_counters() {
+        let mut rows: [UpatchTableRow; 3] = std::array::from_fn(|_| {
+            // SAFETY: an all-zero row is an empty one.
+            let mut r: UpatchTableRow = unsafe { core::mem::zeroed() };
+            r.age_sec = -1;
+            r
+        });
+        rows[0].name[0] = b'a' as c_char;
+        rows[0].missed_counted = 1;
+        rows[0].missed_runs = u64::MAX;
+        rows[1].name[0] = b'b' as c_char;
+        rows[2].name[0] = b'c' as c_char;
+        rows[2].missed_ret = -5;
+
+        let mut e = JsonEmit::growing(4096);
+        e.obj_open();
+        emit_json(&mut e, &rows);
+        e.obj_close();
+        let output = e.finish().unwrap_or_default();
+        assert!(
+            output
+                .windows(b"\"name\":\"a\"".len())
+                .any(|w| w == b"\"name\":\"a\"")
+        );
+        assert_eq!(
+            output
+                .windows(b"\"missed_runs\":18446744073709551615".len())
+                .filter(|w| *w == b"\"missed_runs\":18446744073709551615")
+                .count(),
+            1
+        );
+        assert_eq!(
+            output
+                .windows(b"\"missed_runs\":null".len())
+                .filter(|w| *w == b"\"missed_runs\":null")
+                .count(),
+            2
+        );
+    }
 }

@@ -542,6 +542,13 @@ fn upatch_rows(pins: &[Vec<u8>], java: &[JavaAgent]) -> Vec<UpatchTableRow> {
             }
             r.n_maps =
                 u32::try_from(map_read::list(Some(name.to_bytes())).len()).unwrap_or(u32::MAX);
+            match upatch_resolve::missed_runs(name.to_bytes()) {
+                Ok((counted, missed)) => {
+                    r.missed_counted = counted;
+                    r.missed_runs = missed;
+                }
+                Err(e) => r.missed_ret = e,
+            }
             r
         }));
     }

@@ -37,6 +37,11 @@ impl<const N: usize> Info<N> {
         u32::from_ne_bytes(self.0[off..off + 4].try_into().unwrap_or_default())
     }
 
+    /// The field of 64 bits at `off`.
+    pub(crate) fn u64_at(&self, off: usize) -> u64 {
+        u64::from_ne_bytes(self.0[off..off + 8].try_into().unwrap_or_default())
+    }
+
     /// Sets the bytes at `off`, as a caller asks for more than the
     /// fixed part: a buffer and its size.
     pub(crate) fn set(&mut self, off: usize, v: &[u8]) {

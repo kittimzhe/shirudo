@@ -23,7 +23,9 @@ use crate::util::map_render;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::timefmt::format_duration;
 use crate::util::upatch::name_valid;
-use crate::util::upatch_resolve::{first_prog_id, loaded_at, payload_sha256, resolve_location};
+use crate::util::upatch_resolve::{
+    LinkMisses, each_link_misses, first_prog_id, loaded_at, payload_sha256, resolve_location,
+};
 use crate::util::upatch_table::age_sec;
 
 /// Where `struct bpf_prog_info` keeps what is read of it.
@@ -47,6 +49,8 @@ struct Loaded {
     location: Vec<u8>,
     loaded_at: Vec<u8>,
     payload: Vec<u8>,
+    /// None when the kernel could not read the counters.
+    programs: Option<Vec<LinkMisses>>,
     /// Unique, by file and then line: line_info follows the instructions,
     /// so a line recurs and lines come out of order.
     lines: Vec<Line>,
@@ -120,6 +124,8 @@ fn collect(name: &CStr) -> Result<Loaded, c_int> {
         resolve_location(vbtf, n, o);
     });
 
+    let programs = each_link_misses(vbtf, n).ok();
+
     let prog = bpf_prog_get_fd_by_id(prog_id);
     if prog < 0 {
         return Err(prog);
@@ -132,6 +138,7 @@ fn collect(name: &CStr) -> Result<Loaded, c_int> {
         location,
         loaded_at,
         payload,
+        programs,
         lines: lines?,
     })
 }
@@ -189,6 +196,29 @@ fn text(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) {
             &[&l.payload[..], b"  (signature-bound)"].concat(),
         ));
     }
+    match &l.programs {
+        None => t.extend(kv("Missed runs:", b"unavailable")),
+        Some(programs) if programs.is_empty() => {
+            t.extend(kv("Missed runs:", b"not counted for this attach kind"));
+        }
+        Some(programs) => {
+            let missed = programs.iter().fold(0u64, |n, p| n.wrapping_add(p.missed));
+            t.extend(kv("Missed runs:", missed.to_string().as_bytes()));
+            if programs.len() > 1 {
+                for p in programs {
+                    let location: &[u8] = if p.location.is_empty() {
+                        b"?"
+                    } else {
+                        &p.location
+                    };
+                    t.extend(kv(
+                        "",
+                        &[location, b": ", p.missed.to_string().as_bytes()].concat(),
+                    ));
+                }
+            }
+        }
+    }
     let names = maps
         .iter()
         .map(|m| cstr(&m.name))
@@ -234,6 +264,28 @@ fn json(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) -> c_int {
     } else {
         e.kv_string(b"payload_sha256", &l.payload);
     }
+    if let Some(programs) = &l.programs {
+        if programs.is_empty() {
+            e.kv_null(b"missed_runs");
+        } else {
+            e.kv_u64(
+                b"missed_runs",
+                programs.iter().fold(0u64, |n, p| n.wrapping_add(p.missed)),
+            );
+        }
+    } else {
+        e.kv_null(b"missed_runs");
+    }
+    e.arr_open(b"programs");
+    if let Some(programs) = &l.programs {
+        for p in programs {
+            e.obj_open();
+            e.kv_string(b"location", &p.location);
+            e.kv_u64(b"missed_runs", p.missed);
+            e.obj_close();
+        }
+    }
+    e.arr_close();
     e.obj_open_key(b"source");
     e.arr_open(b"files");
     for file in l.lines.chunk_by(|a, b| a.file == b.file) {

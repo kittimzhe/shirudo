@@ -8,6 +8,7 @@
 use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::fs;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
@@ -16,7 +17,7 @@ use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT};
 use crate::sys::libc::{close, errno, if_indextoname};
 use crate::text::{strscpy, strsprintf};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
-use crate::util::bpf_sys::{bpf_obj_get, bpf_prog_get_fd_by_id, prog_type_name};
+use crate::util::bpf_sys::{self, bpf_obj_get, bpf_prog_get_fd_by_id, prog_type_name};
 use crate::util::timefmt::iso8601;
 use crate::util::upatch::{NAME_MAX, pin_name};
 use crate::util::upatch_pins::{
@@ -42,6 +43,8 @@ const LINK_NETFILTER_PRIORITY: usize = 24;
 const LINK_UPROBE_FLAGS: usize = 56;
 const LINK_KPROBE_COUNT: usize = 24;
 const LINK_KPROBE_FLAGS: usize = 28;
+const LINK_KPROBE_MISSED: usize = 32;
+const LINK_PERF_KPROBE_MISSED: usize = 48;
 const LINK_XDP_IFINDEX: usize = 16;
 const LINK_PERF_EVENT_TYPE: usize = 16;
 const LINK_PERF_UPROBE_FILE_NAME: usize = 24;
@@ -49,7 +52,9 @@ const LINK_PERF_UPROBE_NAME_LEN: usize = 32;
 const LINK_PERF_UPROBE_OFFSET: usize = 36;
 const PROG_TYPE: usize = 0;
 const PROG_ATTACH_BTF_ID: usize = 224;
+const PROG_RECURSION_MISSES: usize = 208;
 
+const BPF_LINK_TYPE_RAW_TRACEPOINT: u32 = 1;
 const BPF_LINK_TYPE_TRACING: u32 = 2;
 const BPF_LINK_TYPE_NETFILTER: u32 = 10;
 const BPF_LINK_TYPE_UPROBE_MULTI: u32 = 12;
@@ -58,6 +63,8 @@ const BPF_LINK_TYPE_XDP: u32 = 6;
 const BPF_LINK_TYPE_PERF_EVENT: u32 = 7;
 const BPF_PERF_EVENT_UPROBE: u32 = 1;
 const BPF_PERF_EVENT_URETPROBE: u32 = 2;
+const BPF_PERF_EVENT_KPROBE: u32 = 3;
+const BPF_PERF_EVENT_KRETPROBE: u32 = 4;
 const BPF_F_UPROBE_MULTI_RETURN: u32 = 1;
 const BPF_F_KPROBE_MULTI_RETURN: u32 = 1;
 const BPF_PROG_TYPE_TRACING: u32 = 26;
@@ -315,6 +322,72 @@ fn uprobe_location(link: c_int, out: &mut [u8]) -> c_int {
     strsprintf(out, &[kind, &path[..end], offset.as_bytes()]).map_or_else(|e| e, |_| 0)
 }
 
+/// Where one link attaches, using program information already read when
+/// provided. The caller owns `link` and closes it after this call.
+fn link_location(
+    vbtf: Option<&Btf>,
+    link: c_int,
+    linfo: &Info<LINK_INFO_SIZE>,
+    pinfo: Option<&Info<PROG_INFO_SIZE>>,
+    out: &mut [u8],
+) -> c_int {
+    let link_type = linfo.u32_at(LINK_TYPE);
+    if link_type == BPF_LINK_TYPE_KPROBE_MULTI {
+        return kprobe_multi(linfo, out);
+    }
+    if link_type == BPF_LINK_TYPE_UPROBE_MULTI {
+        return uprobe_multi(link, linfo, out);
+    }
+    if link_is_uprobe(linfo) {
+        return uprobe_location(link, out);
+    }
+    let attach_type = if link_type == BPF_LINK_TYPE_TRACING {
+        linfo.u32_at(LINK_TRACING_ATTACH_TYPE)
+    } else {
+        0
+    };
+    if link_type == BPF_LINK_TYPE_NETFILTER
+        && linfo.u32_at(LINK_NETFILTER_PF) == NFPROTO_IPV6
+        && linfo.u32_at(LINK_NETFILTER_HOOKNUM) == NF_INET_PRE_ROUTING
+        && linfo.u32_at(LINK_NETFILTER_PRIORITY) as i32 == NF_IP6_PRI_RAW_BEFORE_DEFRAG
+    {
+        return strscpy(out, b"netfilter/ipv6-pre-routing").map_or_else(|e| e, |_| 0);
+    }
+
+    let mut read_info = Info::<PROG_INFO_SIZE>::new();
+    let info = if let Some(info) = pinfo {
+        info
+    } else {
+        let prog = bpf_prog_get_fd_by_id(linfo.u32_at(LINK_PROG_ID));
+        if prog < 0 {
+            return prog;
+        }
+        let ret = read_info.read(prog).err().unwrap_or(0);
+        // SAFETY: the program opened above.
+        unsafe { close(prog) };
+        if ret != 0 {
+            return ret;
+        }
+        &read_info
+    };
+    let prog_type = info.u32_at(PROG_TYPE);
+    let btf_id = info.u32_at(PROG_ATTACH_BTF_ID);
+    let mut attach: &[u8] = vbtf
+        .filter(|b| btf_id != 0 && b.has(btf_id))
+        .and_then(|b| b.str_at(b.name_off(btf_id)))
+        .unwrap_or_default();
+    let prefix = sec_prefix(prog_type, attach_type)
+        .unwrap_or_else(|| prog_type_name(prog_type).unwrap_or(b"?"));
+    // The kernel names an LSM hook's attach point bpf_lsm_<hook>.
+    if prog_type == BPF_PROG_TYPE_LSM {
+        attach = attach.strip_prefix(b"bpf_lsm_").unwrap_or(attach);
+    }
+    if attach.is_empty() {
+        return strscpy(out, prefix).map_or_else(|e| e, |_| 0);
+    }
+    strsprintf(out, &[prefix, b"/", attach]).map_or_else(|e| e, |_| 0)
+}
+
 /// Where upatch `name` attaches, as a C string into `out`: the SEC()-style
 /// hook, its attach target named from `vbtf`, the vmlinux BTF, when there
 /// is one. 0, or -errno and as the C left it.
@@ -330,77 +403,141 @@ pub(crate) fn resolve_location(vbtf: Option<&Btf>, name: &[u8], out: &mut [u8]) 
         return link;
     }
     let mut linfo = Info::<LINK_INFO_SIZE>::new();
-    let ret = linfo.read(link).err().unwrap_or(0);
-    let prog_id = linfo.u32_at(LINK_PROG_ID);
-    if ret != 0 || prog_id == 0 {
-        // SAFETY: the link opened above.
-        unsafe { close(link) };
-        return if ret != 0 { ret } else { -EINVAL };
-    }
-    let link_type = linfo.u32_at(LINK_TYPE);
-    if link_type == BPF_LINK_TYPE_KPROBE_MULTI {
-        let ret = kprobe_multi(&linfo, out);
-        // SAFETY: the link opened above.
-        unsafe { close(link) };
-        return ret;
-    }
-    if link_type == BPF_LINK_TYPE_UPROBE_MULTI {
-        let ret = uprobe_multi(link, &linfo, out);
-        // SAFETY: the link opened above.
-        unsafe { close(link) };
-        return ret;
-    }
-    if link_is_uprobe(&linfo) {
-        let ret = uprobe_location(link, out);
-        // SAFETY: the link opened above.
-        unsafe { close(link) };
-        return ret;
-    }
+    let ret = match linfo.read(link) {
+        Err(e) => e,
+        Ok(()) if linfo.u32_at(LINK_PROG_ID) == 0 => -EINVAL,
+        Ok(()) => link_location(vbtf, link, &linfo, None, out),
+    };
     // SAFETY: the link opened above.
     unsafe { close(link) };
-    let attach_type = if link_type == BPF_LINK_TYPE_TRACING {
-        linfo.u32_at(LINK_TRACING_ATTACH_TYPE)
-    } else {
-        0
-    };
-    if link_type == BPF_LINK_TYPE_NETFILTER
-        && linfo.u32_at(LINK_NETFILTER_PF) == NFPROTO_IPV6
-        && linfo.u32_at(LINK_NETFILTER_HOOKNUM) == NF_INET_PRE_ROUTING
-        && linfo.u32_at(LINK_NETFILTER_PRIORITY) as i32 == NF_IP6_PRI_RAW_BEFORE_DEFRAG
-    {
-        let _ = strscpy(out, b"netfilter/ipv6-pre-routing");
-        return 0;
-    }
+    ret
+}
 
-    let prog = bpf_prog_get_fd_by_id(prog_id);
+/// A counted link's location and the number of runs the kernel skipped.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LinkMisses {
+    pub(crate) location: Vec<u8>,
+    pub(crate) missed: u64,
+}
+
+fn link_is_kprobe(info: &Info<LINK_INFO_SIZE>) -> bool {
+    info.u32_at(LINK_TYPE) == BPF_LINK_TYPE_PERF_EVENT
+        && matches!(
+            info.u32_at(LINK_PERF_EVENT_TYPE),
+            BPF_PERF_EVENT_KPROBE | BPF_PERF_EVENT_KRETPROBE
+        )
+}
+
+/// Whether the kernel counts skipped runs for this link kind.
+pub(crate) fn link_counts_misses(info: &Info<LINK_INFO_SIZE>) -> bool {
+    match info.u32_at(LINK_TYPE) {
+        BPF_LINK_TYPE_KPROBE_MULTI | BPF_LINK_TYPE_RAW_TRACEPOINT => true,
+        BPF_LINK_TYPE_PERF_EVENT => link_is_kprobe(info),
+        BPF_LINK_TYPE_TRACING => matches!(
+            info.u32_at(LINK_TRACING_ATTACH_TYPE),
+            BPF_TRACE_FENTRY | BPF_TRACE_FEXIT | BPF_MODIFY_RETURN
+        ),
+        _ => false,
+    }
+}
+
+/// A kprobe link also counts misses of the link itself.
+pub(crate) fn link_missed(info: &Info<LINK_INFO_SIZE>) -> u64 {
+    if info.u32_at(LINK_TYPE) == BPF_LINK_TYPE_KPROBE_MULTI {
+        return info.u64_at(LINK_KPROBE_MISSED);
+    }
+    if link_is_kprobe(info) {
+        return info.u64_at(LINK_PERF_KPROBE_MISSED);
+    }
+    0
+}
+
+fn total_link_missed(prog: &Info<PROG_INFO_SIZE>, link: &Info<LINK_INFO_SIZE>) -> u64 {
+    prog.u64_at(PROG_RECURSION_MISSES)
+        .wrapping_add(link_missed(link))
+}
+
+fn read_link_misses(
+    vbtf: Option<&Btf>,
+    pin: &CStr,
+    with_location: bool,
+) -> Result<Option<LinkMisses>, c_int> {
+    let link = bpf_sys::obj_get(pin)?;
+    let mut linfo = Info::<LINK_INFO_SIZE>::new();
+    linfo.read(link.as_raw_fd())?;
+    if !link_counts_misses(&linfo) {
+        return Ok(None);
+    }
+    let prog = bpf_prog_get_fd_by_id(linfo.u32_at(LINK_PROG_ID));
     if prog < 0 {
-        return -errno();
+        return Err(prog);
     }
-    let mut info = Info::<PROG_INFO_SIZE>::new();
-    let ret = info.read(prog).err().unwrap_or(0);
-    // SAFETY: the program opened above.
-    unsafe { close(prog) };
-    if ret != 0 {
-        return ret;
+    // SAFETY: the kernel returned a new program descriptor.
+    let prog = unsafe { OwnedFd::from_raw_fd(prog) };
+    let mut pinfo = Info::<PROG_INFO_SIZE>::new();
+    pinfo.read(prog.as_raw_fd())?;
+    let missed = total_link_missed(&pinfo, &linfo);
+    let mut location = [0u8; 160];
+    if with_location {
+        let ret = link_location(vbtf, link.as_raw_fd(), &linfo, Some(&pinfo), &mut location);
+        if ret != 0 {
+            location[0] = 0;
+        }
     }
-    let prog_type = info.u32_at(PROG_TYPE);
-    let btf_id = info.u32_at(PROG_ATTACH_BTF_ID);
+    Ok(Some(LinkMisses {
+        location: crate::text::cstr(&location).to_vec(),
+        missed,
+    }))
+}
 
-    let mut attach: &[u8] = vbtf
-        .filter(|b| btf_id != 0 && b.has(btf_id))
-        .and_then(|b| b.str_at(b.name_off(btf_id)))
-        .unwrap_or_default();
-    let prefix = sec_prefix(prog_type, attach_type)
-        .unwrap_or_else(|| prog_type_name(prog_type).unwrap_or(b"?"));
-    // The kernel names an LSM hook's attach point bpf_lsm_<hook>.
-    if prog_type == BPF_PROG_TYPE_LSM {
-        attach = attach.strip_prefix(b"bpf_lsm_").unwrap_or(attach);
+/// Visit a single `link` pin and every `link_<n>` pin. Links whose kind
+/// does not count skipped runs are omitted.
+fn walk_link_misses(
+    vbtf: Option<&Btf>,
+    name: &[u8],
+    with_location: bool,
+    cb: &mut dyn FnMut(LinkMisses),
+) -> Result<(), c_int> {
+    let pins = Pins::read(name)?;
+    let mut visit = |pin: &CStr| -> c_int {
+        match read_link_misses(vbtf, pin, with_location) {
+            Ok(Some(m)) => {
+                cb(m);
+                0
+            }
+            Ok(None) => 0,
+            Err(e) => e,
+        }
+    };
+    if pins.has_link {
+        let pin = pin_path(name, &[b"link"])?;
+        let ret = visit(&pin);
+        if ret != 0 {
+            return Err(ret);
+        }
     }
-    if attach.is_empty() {
-        let _ = strscpy(out, prefix);
-        return 0;
+    match each_link(name, &mut |_, pin| visit(pin)) {
+        0 => Ok(()),
+        e => Err(e),
     }
-    strsprintf(out, &[prefix, b"/", attach]).map_or_else(|e| e, |_| 0)
+}
+
+/// The counted programs and their locations for `upatch get`.
+pub(crate) fn each_link_misses(vbtf: Option<&Btf>, name: &[u8]) -> Result<Vec<LinkMisses>, c_int> {
+    let mut links = Vec::new();
+    walk_link_misses(vbtf, name, true, &mut |m| links.push(m))?;
+    Ok(links)
+}
+
+/// Counted links and their total skipped runs for the status table.
+pub(crate) fn missed_runs(name: &[u8]) -> Result<(u32, u64), c_int> {
+    let mut count = 0u32;
+    let mut missed = 0u64;
+    walk_link_misses(None, name, false, &mut |m| {
+        count = count.wrapping_add(1);
+        missed = missed.wrapping_add(m.missed);
+    })?;
+    Ok((count, missed))
 }
 
 /// When upatch `name` was loaded, its pin directory's change time, into
