@@ -225,8 +225,8 @@ fn dm_name_ok(name: &[u8]) -> bool {
         .all(|(n, &c)| n < 127 && (c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')))
 }
 
-/// dm_init(): the buffer zeroed with the header of a command on `name`.
-fn dm_init(buf: &mut DmBuffer, name: &[u8]) {
+/// The buffer zeroed with the header of a command on `device`.
+fn dm_init(buf: &mut DmBuffer, device: &DmVerity) {
     *buf = DmBuffer {
         bytes: [0; DM_BUFFER_SIZE],
     };
@@ -235,7 +235,7 @@ fn dm_init(buf: &mut DmBuffer, name: &[u8]) {
     io.version = [DM_VERSION_MAJOR, 0, 0];
     io.data_size = DM_BUFFER_SIZE as u32;
     io.data_start = size_of::<DmIoctl>() as u32;
-    let _ = strscpy(&mut io.name, name);
+    io.name = device.name;
 }
 
 /// The header of the buffer.
@@ -578,12 +578,13 @@ pub(crate) fn inspect(name: &CStr, image: &ConfigImage) -> Result<DmVerity, c_in
         return Err(-EINVAL);
     }
     let mut device = DmVerity::empty();
+    strscpy(&mut device.name, name).map_err(|_| -EINVAL)?;
     let mut buf = DmBuffer {
         bytes: [0; DM_BUFFER_SIZE],
     };
 
     let control = dm_control_open()?;
-    dm_init(&mut buf, name);
+    dm_init(&mut buf, &device);
     io(&mut buf).flags = DM_STATUS_TABLE_FLAG;
     let mut ret = dm_command(control.as_raw_fd(), DM_TABLE_STATUS, &mut buf);
     if ret == 0 {
@@ -596,7 +597,6 @@ pub(crate) fn inspect(name: &CStr, image: &ConfigImage) -> Result<DmVerity, c_in
     if ret != 0 {
         return Err(ret);
     }
-    let _ = strscpy(&mut device.name, name);
     device.image = *image;
     Ok(device)
 }
@@ -661,7 +661,7 @@ pub(crate) fn remove(device: &mut DmVerity, deferred: bool) -> c_int {
         Ok(fd) => fd,
         Err(err) => return err,
     };
-    dm_init(&mut buf, name);
+    dm_init(&mut buf, device);
     if deferred {
         io(&mut buf).flags = DM_DEFERRED_REMOVE;
     }
@@ -811,7 +811,7 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
         return Err(ret);
     }
     device.image = image.image;
-    let _ = strscpy(&mut device.name, name);
+    strscpy(&mut device.name, name).map_err(|_| -EINVAL)?;
     'out: {
         ret = loop_attach(
             &image.data,
@@ -893,13 +893,13 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
                 break 'out;
             }
         }
-        dm_init(&mut buf, name);
+        dm_init(&mut buf, &device);
         ret = dm_command(control, DM_DEV_CREATE, &mut buf);
         if ret != 0 {
             break 'out;
         }
         created = true;
-        dm_init(&mut buf, name);
+        dm_init(&mut buf, &device);
         io(&mut buf).flags = DM_READONLY_FLAG;
         io(&mut buf).target_count = 1;
         let start = io(&mut buf).data_start as usize;
@@ -912,7 +912,7 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
             let mut spec = target.read_unaligned();
 
             spec.length = image.image.data_blocks.wrapping_mul(BLOCK_SIZE / 512);
-            let _ = strscpy(&mut spec.target_type, b"verity");
+            spec.target_type = *b"verity\0\0\0\0\0\0\0\0\0\0";
             spec.next = next;
             target.write_unaligned(spec);
             ptr::copy_nonoverlapping(params.as_ptr(), target.add(1).cast::<u8>(), n as usize + 1);
@@ -929,13 +929,13 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
         if ret != 0 {
             break 'out;
         }
-        dm_init(&mut buf, name);
+        dm_init(&mut buf, &device);
         io(&mut buf).flags = DM_READONLY_FLAG;
         ret = dm_command(control, DM_DEV_SUSPEND, &mut buf);
         if ret != 0 {
             break 'out;
         }
-        dm_init(&mut buf, name);
+        dm_init(&mut buf, &device);
         io(&mut buf).flags = DM_STATUS_TABLE_FLAG;
         ret = dm_command(control, DM_TABLE_STATUS, &mut buf);
         if ret == 0 {
@@ -954,7 +954,7 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
     }
     if ret != 0 {
         if created {
-            dm_init(&mut buf, name);
+            dm_init(&mut buf, &device);
             dm_command(control, DM_DEV_REMOVE, &mut buf);
         }
         close_loops(&mut device);
