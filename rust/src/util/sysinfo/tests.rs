@@ -50,6 +50,7 @@ fn pair(id: &str, version: &str) -> (String, String) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn unquoted_values_are_copied() {
     let img = os_release("NAME=Fleet\nIMAGE_ID=fleet-os\nIMAGE_VERSION=2026.11.1\n");
 
@@ -57,6 +58,7 @@ fn unquoted_values_are_copied() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn one_pair_of_matching_quotes_is_stripped() {
     assert_eq!(
         id_version(os_release(
@@ -73,6 +75,7 @@ fn one_pair_of_matching_quotes_is_stripped() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn double_quotes_drop_the_escaping_backslash() {
     assert_eq!(
         id_version(os_release(
@@ -84,6 +87,7 @@ fn double_quotes_drop_the_escaping_backslash() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn missing_key_is_absent() {
     assert_eq!(
         id_version(os_release(
@@ -95,6 +99,7 @@ fn missing_key_is_absent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn empty_value_is_absent() {
     assert_eq!(
         id_version(os_release("IMAGE_ID=\nIMAGE_VERSION=\"\"\n")),
@@ -103,6 +108,7 @@ fn empty_value_is_absent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn last_assignment_counts() {
     let img = image_of(
         Some(b"IMAGE_ID=first\nIMAGE_ID=second\nIMAGE_VERSION=1\nIMAGE_VERSION=caf\xc3\xa9"),
@@ -114,6 +120,7 @@ fn last_assignment_counts() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn usr_lib_is_read_when_etc_does_not_exist() {
     let usr = Some(&b"IMAGE_ID=from-usr\nIMAGE_VERSION=2\n"[..]);
 
@@ -125,6 +132,7 @@ fn usr_lib_is_read_when_etc_does_not_exist() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn value_longer_than_255_bytes_is_absent() {
     let (longest, too_long) = ("a".repeat(255), "b".repeat(256));
 
@@ -137,6 +145,7 @@ fn value_longer_than_255_bytes_is_absent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn value_outside_printable_ascii_is_absent() {
     let img = image_of(
         Some(b"IMAGE_ID=caf\xc3\xa9\nIMAGE_VERSION=1\t2\n"),
@@ -152,6 +161,7 @@ fn value_outside_printable_ascii_is_absent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn value_with_a_nul_is_absent() {
     assert_eq!(
         id_version(os_release("IMAGE_ID=fle\0et\nIMAGE_VERSION=3\n")),
@@ -160,6 +170,7 @@ fn value_with_a_nul_is_absent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn roothash_wins_over_usrhash() {
     assert_eq!(
         cmdline(&format!(
@@ -174,6 +185,7 @@ fn roothash_wins_over_usrhash() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn usrhash_is_used_without_roothash() {
     assert_eq!(
         cmdline(&format!(
@@ -184,11 +196,13 @@ fn usrhash_is_used_without_roothash() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn hash_is_normalised_to_lowercase() {
     assert_eq!(cmdline(&format!("roothash={ROOT_UPPER}\n")), ROOT_LOWER);
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn malformed_hash_is_absent() {
     for bad in [
         "roothash=abc123\n".to_string(),
@@ -202,6 +216,7 @@ fn malformed_hash_is_absent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn malformed_roothash_does_not_fall_back_to_usrhash() {
     assert_eq!(
         cmdline(&format!("roothash=abc123 usrhash={USR_LOWER}\n")),
@@ -210,6 +225,7 @@ fn malformed_roothash_does_not_fall_back_to_usrhash() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn no_hash_is_absent() {
     assert_eq!(cmdline("BOOT_IMAGE=/vmlinuz root=/dev/sda2 ro\n"), "");
     assert_eq!(cmdline(""), "");
@@ -218,6 +234,7 @@ fn no_hash_is_absent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "image_read_at opens files with O_NONBLOCK")]
 fn command_line_that_does_not_fit_is_absent() {
     const LEN: usize = 8192 + 128;
     let hash = format!(" roothash={ROOT_LOWER}");
