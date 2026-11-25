@@ -343,7 +343,7 @@ fn check_cert_kernel_algo(r: &mut PreflightResult) {
         };
         // SAFETY: add_key(2) with C strings, the certificate's bytes and
         // a keyring, then keyctl(2) clearing that keyring.
-        let ret = unsafe {
+        let err = unsafe {
             let key = syscall(
                 SYS_ADD_KEY,
                 c"asymmetric".as_ptr(),
@@ -352,7 +352,7 @@ fn check_cert_kernel_algo(r: &mut PreflightResult) {
                 der.len(),
                 KEY_SPEC_THREAD_KEYRING,
             );
-            let ret = if key < 0 { errno() } else { 0 };
+            let err = if key < 0 { errno() } else { 0 };
 
             syscall(
                 SYS_KEYCTL,
@@ -362,12 +362,12 @@ fn check_cert_kernel_algo(r: &mut PreflightResult) {
                 0 as c_long,
                 0 as c_long,
             );
-            ret
+            err
         };
-        if ret == 0 {
+        if err == 0 {
             continue;
         }
-        if ret == ENOENT || ret == ENOPKG {
+        if err == ENOENT || err == ENOPKG {
             r.fail(
                 i,
                 &[
@@ -383,7 +383,7 @@ fn check_cert_kernel_algo(r: &mut PreflightResult) {
                     b"kernel rejected ",
                     path,
                     b": ",
-                    errstr(ret),
+                    errstr(err),
                     b" (add_key asymmetric)",
                 ],
             );
