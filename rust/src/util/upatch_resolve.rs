@@ -322,6 +322,19 @@ fn uprobe_location(link: c_int, out: &mut [u8]) -> c_int {
     strsprintf(out, &[kind, &path[..end], offset.as_bytes()]).map_or_else(|e| e, |_| 0)
 }
 
+/// A copied location is empty when it does not fit, as formatted ones are.
+fn location_copy(out: &mut [u8], text: &[u8]) -> c_int {
+    match strscpy(out, text) {
+        Ok(_) => 0,
+        Err(e) => {
+            if let Some(first) = out.first_mut() {
+                *first = 0;
+            }
+            e
+        }
+    }
+}
+
 /// Where one link attaches, using program information already read when
 /// provided. The caller owns `link` and closes it after this call.
 fn link_location(
@@ -351,7 +364,7 @@ fn link_location(
         && linfo.u32_at(LINK_NETFILTER_HOOKNUM) == NF_INET_PRE_ROUTING
         && linfo.u32_at(LINK_NETFILTER_PRIORITY) as i32 == NF_IP6_PRI_RAW_BEFORE_DEFRAG
     {
-        return strscpy(out, b"netfilter/ipv6-pre-routing").map_or_else(|e| e, |_| 0);
+        return location_copy(out, b"netfilter/ipv6-pre-routing");
     }
 
     let mut read_info = Info::<PROG_INFO_SIZE>::new();
@@ -383,7 +396,7 @@ fn link_location(
         attach = attach.strip_prefix(b"bpf_lsm_").unwrap_or(attach);
     }
     if attach.is_empty() {
-        return strscpy(out, prefix).map_or_else(|e| e, |_| 0);
+        return location_copy(out, prefix);
     }
     strsprintf(out, &[prefix, b"/", attach]).map_or_else(|e| e, |_| 0)
 }

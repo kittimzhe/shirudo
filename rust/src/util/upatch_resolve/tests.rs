@@ -132,3 +132,12 @@ fn kprobe_link_misses_are_added_to_program_recursion_misses() {
     info.set(LINK_TRACING_ATTACH_TYPE, &BPF_TRACE_FENTRY.to_ne_bytes());
     assert_eq!(total_link_missed(&prog, &info), 11);
 }
+
+#[test]
+fn location_is_empty_when_a_copy_does_not_fit() {
+    let mut out = [0u8; 5];
+    assert_eq!(location_copy(&mut out, b"lsm"), 0);
+    assert_eq!(crate::text::cstr(&out), b"lsm");
+    assert_eq!(location_copy(&mut out, b"netfilter"), -crate::errno::E2BIG);
+    assert_eq!(out[0], 0);
+}

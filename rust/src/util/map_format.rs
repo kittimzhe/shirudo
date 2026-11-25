@@ -73,9 +73,16 @@ fn unwrap(btf: &Btf, mut id: u32) -> u32 {
     id
 }
 
+/// Copy a BTF type name, or ? if it does not fit the view.
+fn copy_type_name(out: &mut [u8], name: &[u8]) {
+    if crate::text::strscpy(out, name).is_err() {
+        let _ = crate::text::strscpy(out, b"?");
+    }
+}
+
 /// The name of type `id` of `btf`, or of what an anonymous one refers
 /// to within a few hops (an unnamed pointer to a named struct, say),
-/// into `out` as strscpy() leaves it; empty for none.
+/// into `out`; empty for none, ? when the name does not fit.
 pub(crate) fn type_name(btf: Option<&Btf>, id: u32, out: &mut [u8]) {
     if let Some(first) = out.first_mut() {
         *first = 0;
@@ -93,7 +100,7 @@ pub(crate) fn type_name(btf: Option<&Btf>, id: u32, out: &mut [u8]) {
         };
         let n = name(btf, btf.name_off(t));
         if !n.is_empty() {
-            let _ = crate::text::strscpy(out, n);
+            copy_type_name(out, n);
             return;
         }
         id = btf.size_or_type(t);
@@ -443,4 +450,18 @@ pub(crate) fn percpu_sum(v: &MapView, values: &[u8]) -> Vec<u8> {
         sum.wrapping_add(if signed { sign_extend(one, bits) } else { one })
     });
     number(sum, signed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlong_type_name_is_unknown_not_truncated() {
+        let mut out = [0u8; 8];
+        copy_type_name(&mut out, b"small");
+        assert_eq!(crate::text::cstr(&out), b"small");
+        copy_type_name(&mut out, b"name-longer-than-room");
+        assert_eq!(crate::text::cstr(&out), b"?");
+    }
 }

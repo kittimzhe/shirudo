@@ -785,6 +785,11 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32) -> Result<Ma
     Ok(out)
 }
 
+/// A summary cannot reopen a pin if either name is truncated.
+fn summary_names(one: &mut MapSummary, upatch: &[u8], name: &[u8]) -> bool {
+    strscpy(&mut one.upatch, upatch).is_ok() && strscpy(&mut one.name, name).is_ok()
+}
+
 /// The maps upatch `upatch` pins, onto `list`, in directory order: each
 /// that opens, but the serializers' output map.
 fn scan(upatch: &[u8], list: &mut Vec<MapSummary>) {
@@ -819,8 +824,9 @@ fn scan(upatch: &[u8], list: &mut Vec<MapSummary>) {
             n_cpus,
             ..MapSummary::default()
         };
-        let _ = strscpy(&mut one.upatch, upatch);
-        let _ = strscpy(&mut one.name, name);
+        if !summary_names(&mut one, upatch, name) {
+            continue;
+        }
         list.push(one);
     }
 }
@@ -850,3 +856,25 @@ pub(crate) fn list(upatch: Option<&[u8]>) -> Vec<MapSummary> {
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_summary_omits_names_that_do_not_fit() {
+        let mut summary = MapSummary::default();
+        assert!(summary_names(&mut summary, b"patch", b"map"));
+        assert_eq!(crate::text::cstr(&summary.name), b"map");
+        assert!(!summary_names(
+            &mut summary,
+            b"patch",
+            &[b'm'; MAP_NAME_MAX + 1]
+        ));
+        assert!(!summary_names(
+            &mut summary,
+            &[b'p'; UPATCH_NAME_MAX + 1],
+            b"map"
+        ));
+    }
+}

@@ -208,6 +208,24 @@ fn decode_chain(hex: &CStr) -> Option<[u8; DIGEST_LEN]> {
     (unsafe { hex_decode(hex.as_ptr(), want.as_mut_ptr(), DIGEST_LEN) } == 0).then_some(want)
 }
 
+/// Keep a clipped report message visibly clipped, as the C report did.
+fn copy_report_message(dst: &mut [c_char], message: &[u8]) {
+    let Some(room) = dst.len().checked_sub(1) else {
+        return;
+    };
+    let n = message.len().min(room);
+    for (d, &s) in dst.iter_mut().zip(&message[..n]) {
+        *d = c_char::from_ne_bytes([s]);
+    }
+    dst[n] = 0;
+    if message.len() > room && dst.len() >= 4 {
+        let suffix = dst.len() - 4;
+        for (d, &s) in dst[suffix..].iter_mut().zip(b"...\0") {
+            *d = c_char::from_ne_bytes([s]);
+        }
+    }
+}
+
 /// Records a failure in the report.
 pub(super) fn fail(
     rep: &mut OpReport,
@@ -220,11 +238,7 @@ pub(super) fn fail(
     rep.phase = phase;
     rep.category = Some(category);
     rep.err = err.abs();
-    let n = message.len().min(rep.message.len() - 1);
-    for (d, &s) in rep.message.iter_mut().zip(&message[..n]) {
-        *d = s as c_char;
-    }
-    rep.message[n] = 0;
+    copy_report_message(&mut rep.message, message);
 }
 
 fn category_is(rep: &OpReport, category: &[u8]) -> bool {
@@ -1546,11 +1560,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
 
 /// The report's message alone.
 fn fail_message(rep: &mut OpReport, message: &[u8]) {
-    let n = message.len().min(rep.message.len() - 1);
-    for (d, &s) in rep.message.iter_mut().zip(&message[..n]) {
-        *d = s as c_char;
-    }
-    rep.message[n] = 0;
+    copy_report_message(&mut rep.message, message);
 }
 
 /// An install from a package: a load without the prechecks, done when
@@ -1689,4 +1699,39 @@ fn purge_locked(name: &[u8], signer: *const Cert, reason: &[u8]) -> c_int {
     let how: &[u8] = if loaded { b"detached" } else { b"archive_only" };
     log_audit(&[b"upatch purge: name=", name, b" reason=", reason, b" ", how].concat());
     c_int::from(loaded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_report_message_ends_with_ellipsis() {
+        let mut out = [0 as c_char; 8];
+        copy_report_message(&mut out, b"fine");
+        assert_eq!(
+            &out[..5],
+            &[
+                b'f' as c_char,
+                b'i' as c_char,
+                b'n' as c_char,
+                b'e' as c_char,
+                0
+            ]
+        );
+        copy_report_message(&mut out, b"a message too long");
+        assert_eq!(
+            &out,
+            &[
+                b'a' as c_char,
+                b' ' as c_char,
+                b'm' as c_char,
+                b'e' as c_char,
+                b'.' as c_char,
+                b'.' as c_char,
+                b'.' as c_char,
+                0
+            ]
+        );
+    }
 }
