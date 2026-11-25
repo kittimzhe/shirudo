@@ -12,6 +12,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 
 use super::{JSON_MAX, hex, out, pad, print_json};
+use crate::util::format::name_column_width;
 use crate::util::help::{Help, HelpSection};
 use crate::util::java_agent;
 use crate::util::json::JsonEmit;
@@ -80,10 +81,10 @@ fn archived(file: &[u8]) -> Option<Archived> {
     })
 }
 
-fn row(cols: [&[u8]; 4], last: &[u8]) -> Vec<u8> {
+fn row(cols: [&[u8]; 4], last: &[u8], width: usize) -> Vec<u8> {
     [
         &b"  "[..],
-        &pad(cols[0], 24),
+        &pad(cols[0], width),
         b"  ",
         &pad(cols[1], 6),
         b"  ",
@@ -178,14 +179,26 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         return print_json(e, b"upatch list");
     }
 
+    let archived_rows = files.iter().map(|f| archived(f)).collect::<Vec<_>>();
+    let width = name_column_width(
+        files
+            .iter()
+            .zip(&archived_rows)
+            .map(|(file, row)| row.as_ref().map_or(file.as_slice(), |r| r.name.as_slice()))
+            .chain(unarchived.iter().map(Vec::as_slice)),
+    );
     let mut t = format!("Archived upatches ({UPATCHES_DIR}):\n").into_bytes();
     if files.is_empty() && pins.is_empty() {
         t.extend_from_slice(b"  none\n");
     } else {
-        t.extend(row([b"NAME", b"LOADED", b"TYPE", b"KIND"], b"PAYLOAD"));
+        t.extend(row(
+            [b"NAME", b"LOADED", b"TYPE", b"KIND"],
+            b"PAYLOAD",
+            width,
+        ));
     }
-    for f in &files {
-        match archived(f) {
+    for (f, archived) in files.iter().zip(archived_rows) {
+        match archived {
             Some(a) => {
                 let shown = [&a.payload[..16], b".."].concat();
                 t.extend(row(
@@ -196,15 +209,17 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
                         a.payload_type,
                     ],
                     &shown,
+                    width,
                 ));
             }
-            None => t.extend(row([f, b"?", b"?", b"?"], b"unreadable")),
+            None => t.extend(row([f, b"?", b"?", b"?"], b"unreadable", width)),
         }
     }
     for n in &unarchived {
         t.extend(row(
             [n, b"yes", b"-", b"-"],
             b"not archived, gone at reboot",
+            width,
         ));
     }
     out(&t);

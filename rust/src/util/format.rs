@@ -9,6 +9,16 @@ use crate::errno::E2BIG;
 use crate::sys::libc::{File, fputs, snprintf};
 use crate::text::{decimal, strscpy, strsprintf};
 
+/// Width of a NAME column: at least 24 bytes and wide enough for every name.
+pub(crate) fn name_column_width<'a>(names: impl IntoIterator<Item = &'a [u8]>) -> usize {
+    names
+        .into_iter()
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or(0)
+        .max(24)
+}
+
 /// `bytes` with a binary unit, `512B`, `1.50K`, `12.3M` or `256G`: two
 /// decimals below 10, one below 100 and none above, as printf() rounds
 /// them.

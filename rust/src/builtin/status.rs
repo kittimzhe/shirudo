@@ -525,11 +525,14 @@ fn upatch_rows(pins: &[Vec<u8>], java: &[JavaAgent]) -> Vec<UpatchTableRow> {
             // SAFETY: each field's room.
             unsafe {
                 let upatch = name.to_bytes();
-                upatch_resolve::resolve_location(
+                if upatch_resolve::resolve_location(
                     vbtf,
                     upatch,
                     ffi::bytes_mut(r.location.as_mut_ptr().cast(), r.location.len()),
-                );
+                ) != 0
+                {
+                    row_field(&mut r.location, b"?");
+                }
                 upatch_resolve::loaded_at(
                     upatch,
                     ffi::bytes_mut(r.loaded_at.as_mut_ptr().cast(), r.loaded_at.len()),

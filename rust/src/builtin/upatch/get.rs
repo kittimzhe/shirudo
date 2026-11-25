@@ -12,7 +12,7 @@ use std::ffi::CString;
 use super::{JSON_MAX, Summaries, log_err, out, print_json, strerr, type_name};
 use crate::bpf::btf::Btf;
 use crate::sys::libc::close;
-use crate::text::cstr;
+use crate::text::{cstr, strscpy};
 use crate::util::bpf_info::{Info, PROG_INFO_SIZE};
 use crate::util::bpf_sys::bpf_prog_get_fd_by_id;
 use crate::util::help::{Help, HelpSection};
@@ -120,9 +120,11 @@ fn collect(name: &CStr) -> Result<Loaded, c_int> {
     let loaded_at = filled::<32>(|o| loaded_at(n, o));
     let payload = filled::<65>(|o| payload_sha256(n, o));
     let vbtf = kernel_btf::vmlinux();
-    let location = filled::<160>(|o| {
-        resolve_location(vbtf, n, o);
-    });
+    let mut location = [0u8; 160];
+    if resolve_location(vbtf, n, &mut location) != 0 {
+        let _ = strscpy(&mut location, b"?");
+    }
+    let location = cstr(&location).to_vec();
 
     let programs = each_link_misses(vbtf, n).ok();
 
@@ -170,14 +172,7 @@ fn text(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) {
     let mut t = Vec::new();
 
     t.extend(kv("Name:", name.to_bytes()));
-    t.extend(kv(
-        "Location:",
-        if l.location.is_empty() {
-            b"?"
-        } else {
-            &l.location
-        },
-    ));
+    t.extend(kv("Location:", &l.location));
     t.extend(kv("Program ID:", l.prog_id.to_string().as_bytes()));
     if !l.loaded_at.is_empty() {
         let age = age(&l.loaded_at);

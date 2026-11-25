@@ -40,3 +40,13 @@ fn human_size_picks_the_unit() {
     assert_eq!(cstr(&out), b"1.50K");
     assert_eq!(human_size(1536, &mut out[..4]), -E2BIG);
 }
+
+#[test]
+fn name_column_fits_the_longest_name() {
+    assert_eq!(name_column_width(std::iter::empty()), 24);
+    assert_eq!(name_column_width([&b"short"[..], &b"also-short"[..]]), 24);
+    assert_eq!(
+        name_column_width([&b"short"[..], &b"name-longer-than-24-bytes-abcdef"[..]]),
+        32
+    );
+}

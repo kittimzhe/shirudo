@@ -8,6 +8,7 @@ use core::ffi::{c_char, c_long};
 
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{Tm, printf, strptime, timegm};
+use crate::util::format::name_column_width;
 use crate::util::json::JsonEmit;
 use crate::util::timefmt::format_duration;
 
@@ -62,9 +63,22 @@ pub(crate) unsafe fn age_sec(ts: *const c_char) -> i64 {
     now.wrapping_sub(then)
 }
 
+/// The age as it appears in the table, with ? when unknown or too long.
+fn display_age(age_sec: i64) -> [u8; 16] {
+    let mut age = [0u8; 16];
+    age[0] = b'?';
+    if age_sec >= 0 && format_duration(age_sec as c_long, &mut age) != 0 {
+        age[0] = b'?';
+        age[1] = 0;
+    }
+    age
+}
+
 /// The rows as `shirudo status` prints them.
 pub(crate) fn print(rows: &[UpatchTableRow]) {
-    let row = c"  %-24s  %-28s  %5u  %6s  %-28s  %s\n";
+    let row = c"  %-*s  %-28s  %5u  %6s  %-28s  %s\n";
+    let width = name_column_width(rows.iter().map(|r| in_array(&r.name)));
+    let width = i32::try_from(width).unwrap_or(257);
 
     // SAFETY: a format of an unsigned long, and its count.
     unsafe { printf(c"\nLoaded upatches (%zu):\n".as_ptr(), rows.len()) };
@@ -76,7 +90,8 @@ pub(crate) fn print(rows: &[UpatchTableRow]) {
     // SAFETY: a format of five C strings, and those.
     unsafe {
         printf(
-            c"  %-24s  %-28s  %5s  %6s  %-28s  %s\n".as_ptr(),
+            c"  %-*s  %-28s  %5s  %6s  %-28s  %s\n".as_ptr(),
+            width,
             c"NAME".as_ptr(),
             c"LOCATION".as_ptr(),
             c"MAPS".as_ptr(),
@@ -86,17 +101,7 @@ pub(crate) fn print(rows: &[UpatchTableRow]) {
         )
     };
     for r in rows {
-        let mut age = [0u8; 16];
-
-        age[0] = b'?';
-        if r.age_sec >= 0 {
-            format_duration(r.age_sec as c_long, &mut age);
-        }
-        let location = if r.location[0] != 0 {
-            r.location.as_ptr()
-        } else {
-            c"-".as_ptr()
-        };
+        let age = display_age(r.age_sec);
         let status = if r.status[0] != 0 {
             r.status.as_ptr()
         } else {
@@ -118,8 +123,9 @@ pub(crate) fn print(rows: &[UpatchTableRow]) {
         unsafe {
             printf(
                 row.as_ptr(),
+                width,
                 r.name.as_ptr(),
-                location,
+                r.location.as_ptr(),
                 r.n_maps,
                 missed_text,
                 status,
@@ -208,5 +214,12 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn a_time_too_long_to_print_is_unknown() {
+        assert_eq!(&display_age(-1)[..2], b"?\0");
+        assert_eq!(&display_age(i64::MAX)[..2], b"?\0");
+        assert_eq!(&display_age(45)[..4], b"45s\0");
     }
 }

@@ -29,6 +29,7 @@ use crate::util::bpm_package::{
     IndexEntry, UpatchMember, extract, semver_compare, upatch_member, upatch_pair,
 };
 use crate::util::bpm_state::{self, BpmStateEntry};
+use crate::util::format::name_column_width;
 use crate::util::json::JsonEmit;
 use crate::util::seal;
 
@@ -560,6 +561,7 @@ pub(super) fn list(json: bool) -> c_int {
         print(&[e.output(), b"\n"].concat());
         return 0;
     }
+    let width = name_column_width(state.iter().map(|st| cstr(&st.name)));
     print(b"Installed packages:\n");
     if state.is_empty() {
         print(b"  none\n");
@@ -567,7 +569,7 @@ pub(super) fn list(json: bool) -> c_int {
         print(
             &[
                 b"  ",
-                &padded(b"NAME", 24)[..],
+                &padded(b"NAME", width)[..],
                 b"  ",
                 &padded(b"VERSION", 12),
                 b"  SOURCE\n",
@@ -579,7 +581,7 @@ pub(super) fn list(json: bool) -> c_int {
         print(
             &[
                 b"  ",
-                &padded(cstr(&st.name), 24)[..],
+                &padded(cstr(&st.name), width)[..],
                 b"  ",
                 &padded(cstr(&st.version), 12),
                 b"  ",
