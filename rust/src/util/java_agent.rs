@@ -105,7 +105,7 @@ fn jar_installed(name: &[u8], jar: &[u8]) -> Result<bool, c_int> {
         Err(err) => return Err(err),
     };
     let file = File::from(fd);
-    let have = io::read_whole(file.as_fd(), &path, FILE_MAX)?;
+    let have = io::read_whole(file.as_fd(), FILE_MAX)?;
     Ok(have == jar)
 }
 

@@ -296,11 +296,7 @@ fn verify_config_root(
     if bootstrap.n_certificates == 0 {
         return -ENOKEY;
     }
-    let sig = match read_whole(
-        signature.as_fd(),
-        c"config root signature",
-        CONFIG_IMAGE_SIG_MAX,
-    ) {
+    let sig = match read_whole(signature.as_fd(), CONFIG_IMAGE_SIG_MAX) {
         Ok(sig) => sig,
         Err(err) => return err,
     };

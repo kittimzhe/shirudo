@@ -7,20 +7,25 @@
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 
-use crate::errno::{E2BIG, EFBIG, EINTR, EINVAL, EIO, ENOENT, ENOMEM, EPERM};
+use crate::errno::{
+    E2BIG, EFBIG, EINTR, EINVAL, EIO, EISDIR, ELOOP, ENAMETOOLONG, ENOENT, ENOMEM, ENOTDIR, EPERM,
+    ESTALE,
+};
 use crate::ffi;
 use crate::heap::xmalloc;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, Dir, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW,
-    O_NONBLOCK, O_PATH, O_RDONLY, PATH_MAX, S_IFDIR, S_IFMT, S_IFREG, S_ISVTX,
+    O_NONBLOCK, O_PATH, O_RDONLY, PATH_MAX, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, S_ISVTX,
     STATX_ATTR_MOUNT_ROOT, STATX_BASIC_STATS, Statfs, Statx, close, closedir, errno, fdopendir,
-    flock, fstatfs, fsync, ftruncate, geteuid, getline, open, openat, pread, readdir, set_errno,
-    statx, syscall, write,
+    flock, fstatfs, fsync, ftruncate, geteuid, getline, open, openat, pread, readdir, readlinkat,
+    set_errno, statx, syscall, write,
 };
 use crate::util::seal;
 use core::ptr::NonNull;
+use std::ffi::CString;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 
 /// `ETC_DIR` of util/paths.h.
 const ETC_DIR: &CStr = c"/etc/shirudo";
@@ -32,6 +37,11 @@ const BPF_FS_MAGIC: i64 = 0xcafe_4a11;
 const SYS_OPENAT2: core::ffi::c_long = 437;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+/// As many links as the kernel follows on the way to one file.
+const TRUSTED_LINKS_MAX: usize = 40;
+/// Reopens after the first open of a trusted name.
+const TRUSTED_REOPENS: usize = 3;
+
 const RESOLVE_BENEATH: u64 = 0x08;
 
 /// `struct open_how`.
@@ -288,16 +298,12 @@ pub(crate) fn open_beneath(dirfd: c_int, rel: &CStr, flags: c_int) -> Result<Own
 }
 
 /// The whole regular file behind `fd`, from its start, of at most `max`
-/// bytes, which may steer trust as `label` says.
-pub(crate) fn read_whole(fd: BorrowedFd<'_>, label: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
+/// bytes.
+pub(crate) fn read_whole(fd: BorrowedFd<'_>, max: usize) -> Result<Vec<u8>, c_int> {
     let st = stat_fd(fd)?;
 
     if st.stx_mode & S_IFMT != S_IFREG {
         return Err(-EINVAL);
-    }
-    let ret = check_trusted(fd, label, false);
-    if ret != 0 {
-        return Err(ret);
     }
     let size = usize::try_from(st.stx_size)
         .ok()
@@ -393,23 +399,41 @@ fn under_dir(p: &[u8], dir: &CStr) -> bool {
     p.starts_with(d) && p.get(d.len()) == Some(&b'/')
 }
 
-/// The regular file at `path`, of at most `max` bytes; one under
-/// /var/lib/shirudo opened through its seal.
-pub(crate) fn read(path: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
+/// `path` opened with `flags` and close-on-exec.
+fn open_path(path: &CStr, flags: c_int) -> Result<OwnedFd, c_int> {
+    // SAFETY: a C string and flags without a mode.
+    let fd = unsafe { open(path.as_ptr(), flags | O_CLOEXEC) };
+
+    if fd < 0 {
+        return Err(-errno());
+    }
+    // SAFETY: the fd open() just gave, owned from here.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// A regular file for [`read`], with sealed state under /var/lib/shirudo.
+fn open_regular(path: &CStr, flags: c_int) -> Result<OwnedFd, c_int> {
     let fd = if under_dir(path.to_bytes(), VAR_LIB) {
         seal::open_read(path.to_bytes())?
     } else {
-        // SAFETY: a C string and flags.
-        let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_NONBLOCK | O_CLOEXEC) };
-
-        if fd < 0 {
-            return Err(-errno());
-        }
-        // SAFETY: the fd just opened, owned from here and closed when it
-        // goes.
-        unsafe { OwnedFd::from_raw_fd(fd) }
+        // O_NONBLOCK makes a FIFO fail the regular-file check instead of
+        // waiting for a writer.
+        open_path(path, flags | O_NONBLOCK)?
     };
-    read_whole(fd.as_fd(), path, max)
+    let st = stat_fd(fd.as_fd())?;
+
+    if st.stx_mode & S_IFMT != S_IFREG {
+        return Err(-EINVAL);
+    }
+    Ok(fd)
+}
+
+/// The regular file at `path`, of at most `max` bytes; one under
+/// /var/lib/shirudo opened through its seal.
+pub(crate) fn read(path: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
+    let fd = open_checked(path, O_RDONLY, trusted_dirs(), open_regular)?;
+
+    read_whole(fd.as_fd(), max)
 }
 
 /// As [`read`], into `*out`, xmalloc'd to `*len + 1` bytes and
@@ -429,91 +453,312 @@ pub(crate) unsafe fn read_file(
     unsafe { hand_over(read(CStr::from_ptr(path), max), out, len) }
 }
 
+const TRUSTED_DIRS: [&CStr; 2] = [ETC_DIR, VAR_LIB];
+
+fn trusted_dirs() -> &'static [&'static CStr] {
+    &TRUSTED_DIRS
+}
+
 fn trusted_owner(uid: u32) -> bool {
     // SAFETY: a call that takes nothing.
     uid == 0 || uid == unsafe { geteuid() }
 }
 
-/// Whether the file open on `fd` at `path` may steer what shirudo
-/// trusts: under /etc/shirudo and /var/lib/shirudo a regular file of
-/// root's or the user's that nobody else can write, nor with `secret`
-/// read, in directories up to / that nobody else can change, a sticky
-/// one of root's guarding its files; elsewhere the caller's to vouch
-/// for. 0, or -EPERM logged, or -errno.
-pub(crate) fn check_trusted(fd: BorrowedFd<'_>, path: &CStr, secret: bool) -> c_int {
-    let path_text = path.to_bytes();
+fn trusted_place(path: &CStr, dirs: &[&CStr]) -> bool {
+    dirs.iter().any(|dir| under_dir(path.to_bytes(), dir))
+}
 
-    if !under_dir(path_text, ETC_DIR) && !under_dir(path_text, VAR_LIB) {
-        return 0;
+/// What `fd` is open on, named for a message.
+fn opened_path(fd: BorrowedFd<'_>) -> Vec<u8> {
+    let link = format!("/proc/self/fd/{}", fd.as_raw_fd());
+
+    std::fs::read_link(link)
+        .ok()
+        .map(|path| path.as_os_str().as_bytes().to_vec())
+        .filter(|path| path.len() < PATH_MAX)
+        .unwrap_or_else(|| b"?".to_vec())
+}
+
+struct TrustedWalk<'a> {
+    path: &'a CStr,
+    rest: Vec<u8>,
+    dir: OwnedFd,
+    links: usize,
+}
+
+impl<'a> TrustedWalk<'a> {
+    fn new(path: &'a CStr) -> Result<Self, c_int> {
+        if path.to_bytes().len() >= PATH_MAX {
+            return Err(-ENAMETOOLONG);
+        }
+        Ok(Self {
+            path,
+            rest: path.to_bytes().to_vec(),
+            dir: open_path(c"/", O_PATH | O_DIRECTORY)?,
+            links: 0,
+        })
     }
-    let st = match stat_fd(fd) {
-        Ok(st) => st,
-        Err(err) => return err,
-    };
-    if st.stx_mode & S_IFMT != S_IFREG
-        || !trusted_owner(st.stx_uid)
-        || st.stx_mode & if secret { 0o77 } else { 0o22 } != 0
-    {
-        let could = if secret { c"read or change" } else { c"change" };
 
+    fn check_dir(&self) -> Result<(), c_int> {
+        let st = stat_fd(self.dir.as_fd())?;
+        let mode = st.stx_mode;
+
+        if mode & S_IFMT != S_IFDIR {
+            return Err(-ENOTDIR);
+        }
+        let sticky_root = mode & S_ISVTX != 0 && st.stx_uid == 0;
+        if trusted_owner(st.stx_uid) && (mode & 0o22 == 0 || sticky_root) {
+            return Ok(());
+        }
+        let name = opened_path(self.dir.as_fd());
         crate::log::err(
             &[
-                path_text,
-                b": owner ",
+                self.path.to_bytes(),
+                b": directory ",
+                &name,
+                b", owner ",
                 format!("{}", st.stx_uid).as_bytes(),
                 b", mode ",
-                format!("{:04o}", u32::from(st.stx_mode & 0o7777)).as_bytes(),
-                b": refusing a file another user could ",
-                could.to_bytes(),
+                format!("{:04o}", u32::from(mode & 0o7777)).as_bytes(),
+                b": refusing a file another user could replace",
             ]
             .concat(),
         );
-        return -EPERM;
+        Err(-EPERM)
     }
-    use std::ffi::{CString, OsStr};
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
 
-    // The file's directories up to /, as realpath() resolves its path
-    // and as statx() of each, following links, finds them.
-    let errno = |e: std::io::Error| -e.raw_os_error().unwrap_or(crate::errno::EIO);
-    let real = match std::fs::canonicalize(OsStr::from_bytes(path_text)) {
-        Ok(real) => real,
-        Err(e) => return errno(e),
-    };
-    // realpath()'s bound, which canonicalize() does not keep.
-    if real.as_os_str().len() >= PATH_MAX {
-        return -crate::errno::ENAMETOOLONG;
-    }
-    for dir in real.ancestors().skip(1) {
-        let st = match std::fs::metadata(dir) {
-            Ok(st) => st,
-            Err(e) => return errno(e),
+    fn open_name(&self, name: &[u8]) -> Result<OwnedFd, c_int> {
+        let name = CString::new(name).map_err(|_| -EINVAL)?;
+        // SAFETY: the checked directory, one C-string component and flags.
+        let fd = unsafe {
+            openat(
+                self.dir.as_raw_fd(),
+                name.as_ptr(),
+                O_PATH | O_NOFOLLOW | O_CLOEXEC,
+            )
         };
-        let mode = st.mode();
-        let sticky_root = mode & u32::from(S_ISVTX) != 0 && st.uid() == 0;
-        if mode & u32::from(S_IFMT) != u32::from(S_IFDIR)
-            || !trusted_owner(st.uid())
-            || (mode & 0o22 != 0 && !sticky_root)
-        {
-            let dir = CString::new(dir.as_os_str().as_bytes()).unwrap_or_default();
+
+        if fd < 0 {
+            return Err(-errno());
+        }
+        // SAFETY: openat() just returned this owned fd.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    fn follow_link(&mut self, link: BorrowedFd<'_>, owner: u32, left: &[u8]) -> Result<(), c_int> {
+        if !trusted_owner(owner) {
+            let name = opened_path(link);
             crate::log::err(
                 &[
-                    path_text,
-                    b": directory ",
-                    dir.to_bytes(),
+                    self.path.to_bytes(),
+                    b": link ",
+                    &name,
                     b", owner ",
-                    format!("{}", st.uid()).as_bytes(),
-                    b", mode ",
-                    format!("{:04o}", mode & 0o7777).as_bytes(),
+                    format!("{owner}").as_bytes(),
                     b": refusing a file another user could replace",
                 ]
                 .concat(),
             );
-            return -EPERM;
+            return Err(-EPERM);
+        }
+        self.links += 1;
+        if self.links > TRUSTED_LINKS_MAX {
+            return Err(-ELOOP);
+        }
+        let mut target = [0u8; PATH_MAX];
+        // SAFETY: an O_PATH descriptor for the link, an empty path, and
+        // the room in target.
+        let n = unsafe {
+            readlinkat(
+                link.as_raw_fd(),
+                c"".as_ptr(),
+                target.as_mut_ptr().cast(),
+                target.len(),
+            )
+        };
+        if n < 0 {
+            return Err(-errno());
+        }
+        let n = n as usize;
+        if n >= target.len() {
+            return Err(-ENAMETOOLONG);
+        }
+        let absolute = target.first() == Some(&b'/');
+        let len = n
+            .checked_add(1)
+            .and_then(|len| len.checked_add(left.len()))
+            .filter(|&len| len < PATH_MAX)
+            .ok_or(-ENAMETOOLONG)?;
+        let mut rest = Vec::with_capacity(len);
+
+        rest.extend_from_slice(&target[..n]);
+        rest.push(b'/');
+        rest.extend_from_slice(left);
+        self.rest = rest;
+        if absolute {
+            self.dir = open_path(c"/", O_PATH | O_DIRECTORY)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve one name at a time through checked directory descriptors,
+    /// and finish at the same inode as `file`.
+    fn finish_at(mut self, file: &Statx) -> Result<(), c_int> {
+        loop {
+            self.check_dir()?;
+            let start = self
+                .rest
+                .iter()
+                .position(|&c| c != b'/')
+                .unwrap_or(self.rest.len());
+            if start == self.rest.len() {
+                return Err(-EISDIR);
+            }
+            let end = self.rest[start..]
+                .iter()
+                .position(|&c| c == b'/')
+                .map_or(self.rest.len(), |end| start + end);
+            let name = self.rest[start..end].to_vec();
+            let left = self.rest[end..].to_vec();
+            let fd = self.open_name(&name)?;
+            let st = stat_fd(fd.as_fd())?;
+
+            match st.stx_mode & S_IFMT {
+                S_IFDIR => {
+                    self.dir = fd;
+                    self.rest = left;
+                }
+                S_IFLNK => self.follow_link(fd.as_fd(), st.stx_uid, &left)?,
+                _ => {
+                    if left.iter().any(|&c| c != b'/') {
+                        return Err(-ENOTDIR);
+                    }
+                    return if st.stx_dev_major == file.stx_dev_major
+                        && st.stx_dev_minor == file.stx_dev_minor
+                        && st.stx_ino == file.stx_ino
+                    {
+                        Ok(())
+                    } else {
+                        Err(-ESTALE)
+                    };
+                }
+            }
         }
     }
-    0
+}
+
+/// Check the file by itself, whatever path led to it.
+fn trusted_file(fd: BorrowedFd<'_>, path: &CStr, secret: bool) -> Result<Statx, c_int> {
+    let st = stat_fd(fd)?;
+
+    if st.stx_mode & S_IFMT == S_IFREG
+        && trusted_owner(st.stx_uid)
+        && st.stx_mode & if secret { 0o77 } else { 0o22 } == 0
+    {
+        return Ok(st);
+    }
+    let could: &[u8] = if secret { b"read or change" } else { b"change" };
+    crate::log::err(
+        &[
+            path.to_bytes(),
+            b": owner ",
+            format!("{}", st.stx_uid).as_bytes(),
+            b", mode ",
+            format!("{:04o}", u32::from(st.stx_mode & 0o7777)).as_bytes(),
+            b": refusing a file another user could ",
+            could,
+        ]
+        .concat(),
+    );
+    Err(-EPERM)
+}
+
+/// The trusted-file check without the final stale report, so a caller can
+/// absorb a rename by opening the name again.
+fn trusted_check(fd: BorrowedFd<'_>, path: &CStr, dirs: &[&CStr]) -> Result<(), c_int> {
+    if !trusted_place(path, dirs) {
+        return Ok(());
+    }
+    let file = trusted_file(fd, path, false)?;
+
+    TrustedWalk::new(path)?.finish_at(&file)
+}
+
+fn report_stale(path: &CStr) {
+    crate::log::err(
+        &[
+            path.to_bytes(),
+            b": names another file than the one opened; refusing it",
+        ]
+        .concat(),
+    );
+}
+
+fn check_trusted_in(fd: BorrowedFd<'_>, path: &CStr, dirs: &[&CStr]) -> c_int {
+    match trusted_check(fd, path, dirs) {
+        Ok(()) => 0,
+        Err(ret) => {
+            if ret == -ESTALE {
+                report_stale(path);
+            }
+            ret
+        }
+    }
+}
+
+/// Whether the file open on `fd` at `path` may steer what shirudo
+/// trusts. A path outside the installed trusted directories is the
+/// caller's to vouch for. 0, -EPERM or -ESTALE logged, or -errno.
+pub(crate) fn check_trusted(fd: BorrowedFd<'_>, path: &CStr) -> c_int {
+    check_trusted_in(fd, path, trusted_dirs())
+}
+
+fn check_secret_in(fd: BorrowedFd<'_>, path: &CStr, dirs: &[&CStr]) -> c_int {
+    if !trusted_place(path, dirs) {
+        return 0;
+    }
+    trusted_file(fd, path, true).map_or_else(|ret| ret, |_| 0)
+}
+
+/// Whether a trusted file may hold a secret: nobody but its owner may
+/// read it. The path already passed check_trusted() and is not walked
+/// again. 0 or -EPERM logged.
+pub(crate) fn check_secret(fd: BorrowedFd<'_>, path: &CStr) -> c_int {
+    check_secret_in(fd, path, trusted_dirs())
+}
+
+/// Open and fully check one descriptor at a time. A trusted name renamed
+/// over during its check is opened again up to three times.
+fn open_checked<F>(
+    path: &CStr,
+    flags: c_int,
+    dirs: &[&CStr],
+    mut opener: F,
+) -> Result<OwnedFd, c_int>
+where
+    F: FnMut(&CStr, c_int) -> Result<OwnedFd, c_int>,
+{
+    for attempt in 0..=TRUSTED_REOPENS {
+        let fd = opener(path, flags)?;
+
+        match trusted_check(fd.as_fd(), path, dirs) {
+            Ok(()) => return Ok(fd),
+            Err(ret) if ret == -ESTALE && attempt < TRUSTED_REOPENS => {}
+            Err(ret) => {
+                if ret == -ESTALE {
+                    report_stale(path);
+                }
+                return Err(ret);
+            }
+        }
+    }
+    unreachable!()
+}
+
+/// A descriptor on `path` opened with `flags` that passed the trusted
+/// check, with bounded retries when a trusted writer renames over it.
+pub(crate) fn open_trusted(path: &CStr, flags: c_int) -> Result<OwnedFd, c_int> {
+    open_checked(path, flags, trusted_dirs(), open_path)
 }
 
 /// A st_dev or st_rdev as the kernel encodes the dev_t in s_dev.

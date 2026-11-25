@@ -12,7 +12,6 @@ use core::mem::ManuallyDrop;
 use core::ptr;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use openssl::ssl::{SslContextBuilder, SslVersion};
 use openssl::x509::X509;
@@ -24,7 +23,7 @@ use crate::sys::curl::{
     CURLE_SSL_CONNECT_ERROR, CURLOPT_FORBID_REUSE, CURLOPT_SSL_SESSIONID_CACHE, CURLOPT_SSLVERSION,
     CURLUPART_HOST, CURLUPART_SCHEME, Curl, CurlCode,
 };
-use crate::sys::libc::{O_CLOEXEC, O_RDONLY, open, strcasecmp};
+use crate::sys::libc::{O_RDONLY, strcasecmp};
 use crate::sys::openssl::{
     SSL_CB_HANDSHAKE_DONE, SSL_CTRL_GET_NEGOTIATED_GROUP, SSL_CTX_set_info_callback,
     SSL_group_to_name,
@@ -33,7 +32,7 @@ use crate::text::{cstr, dns_name_valid};
 use crate::util::config::{self, Scrubbed};
 use crate::util::curl::{Easy, Url};
 use crate::util::image_config;
-use crate::util::io::check_trusted;
+use crate::util::io::open_trusted;
 
 /// The groups of every host by default: hybrid ML-KEM alone.
 const TLS_GROUPS: &str = "*X25519MLKEM768:SecP256r1MLKEM768";
@@ -139,18 +138,12 @@ unsafe extern "C" fn info_callback(ssl: *const SSL, kind: c_int, _ret: c_int) {
 /// not trusted or holds no PEM certificate. A certificate the store
 /// already has, or cannot add, leaves the store as it was.
 fn add_ca(ctx: &mut SslContextBuilder, path: &CStr) -> CurlCode {
-    // SAFETY: a C string, and flags.
-    let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-
-    if fd < 0 {
+    let Ok(fd) = open_trusted(path, O_RDONLY) else {
         return CURLE_SSL_CACERT_BADFILE;
-    }
-    // SAFETY: the fd open() gave, owned from here.
-    let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    if check_trusted(file.as_fd(), path, false) != 0 {
-        return CURLE_SSL_CACERT_BADFILE;
-    }
+    };
+    let file = File::from(fd);
     let mut text = Vec::new();
+
     if (&file).read_to_end(&mut text).is_err() {
         return CURLE_SSL_CACERT_BADFILE;
     }

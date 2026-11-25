@@ -17,14 +17,14 @@ use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::errno::{EINVAL, EIO, ENAMETOOLONG};
 use crate::ffi;
 use crate::heap::libc_free;
 use crate::sys::curl::{CURL_GLOBAL_DEFAULT, CURLE_OK, curl_global_cleanup, curl_global_init};
 use crate::sys::libc::{
-    Dir, File, LOCK_UN, PATH_MAX, closedir, errno, fclose, fdopen, fdopendir, flock, fopen, fwrite,
+    Dir, File, LOCK_UN, PATH_MAX, closedir, errno, fclose, fdopen, fdopendir, flock, fwrite,
     opendir, readdir, stdout, strerror, unlink,
 };
 use crate::util::io::read_text_line;
@@ -164,15 +164,6 @@ fn remove(path: &CStr) {
 struct Stream(*mut File);
 
 impl Stream {
-    fn open(path: &CStr) -> Result<Stream> {
-        // SAFETY: C strings.
-        let f = unsafe { fopen(path.as_ptr(), c"re".as_ptr()) };
-        if f.is_null() {
-            return Err(last_err());
-        }
-        Ok(Stream(f))
-    }
-
     /// A stream on `fd`, which it takes over, or the -errno `fd` is.
     fn from_fd(fd: c_int) -> Result<Stream> {
         if fd < 0 {
@@ -187,12 +178,6 @@ impl Stream {
         }
         core::mem::forget(fd);
         Ok(Stream(f))
-    }
-
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        // SAFETY: the stream's own FILE, whose fd stays open until the
-        // stream closes it.
-        unsafe { BorrowedFd::borrow_raw(crate::sys::libc::fileno(self.0)) }
     }
 
     /// Each line of at most PATH_MAX - 1 bytes to `each`, as a C string

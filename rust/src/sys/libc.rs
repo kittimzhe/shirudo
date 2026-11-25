@@ -11,14 +11,14 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 pub use libc::explicit_bzero;
 pub use libc::{
     _exit, access, calloc, close, closedir, execv, execvp, faccessat, fchmod, fclose, fcntl,
-    fdopen, fdopendir, ferror, fgets, fgetxattr, fileno, flock, fopen, fputc, fputs, free,
-    fsetxattr, fstatfs, fstatvfs, fsync, ftruncate, fwrite, getenv, geteuid, gethostname, getline,
-    getrandom, getsockopt, getxattr, gmtime_r, if_indextoname, ioctl, lgetxattr, link, lseek,
-    lsetxattr, memfd_create, mkdirat, mkdtemp, mknod, mkstemp, mkstemps, mlockall, mount, open,
-    openat, opendir, openlog, personality, posix_memalign, prctl, pread, printf, putchar, read,
-    readdir, recvmsg, renameat, rmdir, sendto, setenv, setitimer, setrlimit, setsockopt, setxattr,
-    snprintf, socket, sscanf, statfs, statvfs, statx, strcasecmp, strerror, strftime, strlen,
-    strnlen, strptime, syscall, sysconf, syslog, timegm, umount2, uname, unlink, unlinkat,
+    fdopen, fdopendir, ferror, fgets, fgetxattr, flock, fopen, fputc, fputs, free, fsetxattr,
+    fstatfs, fstatvfs, fsync, ftruncate, fwrite, getenv, geteuid, gethostname, getline, getrandom,
+    getsockopt, getxattr, gmtime_r, if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr,
+    memfd_create, mkdirat, mkdtemp, mknod, mkstemp, mkstemps, mlockall, mount, open, openat,
+    opendir, openlog, personality, posix_memalign, prctl, pread, printf, putchar, read, readdir,
+    readlinkat, recvmsg, renameat, rmdir, sendto, setenv, setitimer, setrlimit, setsockopt,
+    setxattr, snprintf, socket, sscanf, statfs, statvfs, statx, strcasecmp, strerror, strftime,
+    strlen, strnlen, strptime, syscall, sysconf, syslog, timegm, umount2, uname, unlink, unlinkat,
     unsetenv, write,
 };
 
@@ -68,6 +68,7 @@ pub const STATX_ATTR_MOUNT_ROOT: u64 = libc::STATX_ATTR_MOUNT_ROOT as u64;
 pub const S_IFMT: u16 = libc::S_IFMT as u16;
 pub const S_IFREG: u16 = libc::S_IFREG as u16;
 pub const S_IFDIR: u16 = libc::S_IFDIR as u16;
+pub const S_IFLNK: u16 = libc::S_IFLNK as u16;
 pub const S_IFCHR: u16 = libc::S_IFCHR as u16;
 pub const S_IFBLK: u16 = libc::S_IFBLK as u16;
 pub const S_ISVTX: u16 = libc::S_ISVTX as u16;

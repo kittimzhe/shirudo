@@ -138,11 +138,10 @@ impl FileBuf {
         Self::of(crate::util::io::read(path, MAX_BYTES))
     }
 
-    /// The file open at `fd`, read whole, `label` naming it in a refusal.
-    fn read_fd(fd: std::os::fd::OwnedFd, label: &CStr) -> Result<FileBuf, c_int> {
+    /// The file open at `fd`, read whole.
+    fn read_fd(fd: std::os::fd::OwnedFd) -> Result<FileBuf, c_int> {
         Self::of(crate::util::io::read_whole(
             std::os::fd::AsFd::as_fd(&fd),
-            label,
             MAX_BYTES,
         ))
     }
@@ -207,7 +206,7 @@ fn read_pending() -> Result<FileBuf, c_int> {
     } else {
         seal::open_read(pending.to_bytes())?
     };
-    FileBuf::read_fd(fd, pending)
+    FileBuf::read_fd(fd)
 }
 
 /// The sealed log and the pending record after it, for a reader that

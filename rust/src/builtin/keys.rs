@@ -11,7 +11,7 @@ use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+use std::os::fd::{FromRawFd, OwnedFd};
 
 use foreign_types::ForeignTypeRef;
 use openssl::asn1::Asn1TimeRef;
@@ -38,7 +38,7 @@ use crate::util::help::{
 };
 use crate::util::identity;
 use crate::util::image_config;
-use crate::util::io::{check_trusted, dir_names};
+use crate::util::io::{dir_names, open_trusted};
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{
@@ -129,19 +129,29 @@ fn complain(what: &CStr) {
 /// and the allocator scrubs them when they go, so that a key read this
 /// way leaves no copy behind.
 fn read_file(path: &CStr, trusted: bool) -> Option<Vec<u8>> {
-    // SAFETY: a C string.
-    let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
+    let opened = if trusted {
+        open_trusted(path, O_RDONLY)
+    } else {
+        // SAFETY: a C string and flags without a mode.
+        let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
 
-    if fd < 0 {
-        error(&[b"open ", path.to_bytes(), b": ", strerr(errno())]);
-        return None;
-    }
-    // SAFETY: the fd open() gave, owned from here.
-    let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    if trusted && check_trusted(file.as_fd(), path, false) != 0 {
-        return None;
-    }
+        if fd < 0 {
+            Err(-errno())
+        } else {
+            // SAFETY: open() just returned this owned fd.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    };
+    let fd = match opened {
+        Ok(fd) => fd,
+        Err(ret) => {
+            error(&[b"open ", path.to_bytes(), b": ", strerr(-ret)]);
+            return None;
+        }
+    };
+    let file = File::from(fd);
     let mut text = Vec::new();
+
     if let Err(e) = (&file).read_to_end(&mut text) {
         error(&[
             b"read ",

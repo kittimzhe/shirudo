@@ -13,7 +13,7 @@ use core::ptr;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::BorrowedFd;
 
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl::asn1::{Asn1Time, Asn1TimeRef};
@@ -41,10 +41,10 @@ use openssl_sys as ffi;
 
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOMEM, ENOPKG, EPROTONOSUPPORT};
 use crate::ffi::slice;
-use crate::sys::libc::{O_CLOEXEC, O_RDONLY, errno, open};
+use crate::sys::libc::O_RDONLY;
 use crate::sys::openssl as more;
 use crate::text::strscpy;
-use crate::util::io::{check_trusted, read_whole};
+use crate::util::io::{open_trusted, read_whole};
 
 pub(crate) const SHA256_LEN: usize = 32;
 
@@ -141,18 +141,9 @@ pub(crate) fn x509_from_der_bio(der: &[u8]) -> Result<X509, ErrorStack> {
 /// The certificate at `path`, PEM or DER, from a file only root may
 /// write: -EINVAL for one that does not parse, or -errno.
 fn read_x509(path: &CStr) -> Result<X509, c_int> {
-    // SAFETY: a C string and flags without a mode.
-    let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-    if fd < 0 {
-        return Err(-errno());
-    }
-    // SAFETY: the fd open() gave, owned from here.
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let ret = check_trusted(fd.as_fd(), path, false);
-    if ret != 0 {
-        return Err(ret);
-    }
+    let fd = open_trusted(path, O_RDONLY)?;
     let mut text = Vec::new();
+
     File::from(fd).read_to_end(&mut text).map_err(|_| -EINVAL)?;
     X509::from_pem(&text)
         .or_else(|_| x509_from_der_bio(&text))
@@ -457,7 +448,7 @@ pub(crate) unsafe fn cert_read_fd(fd: BorrowedFd<'_>, cert: *mut Cert) -> c_int 
     if cert.is_null() {
         return -EINVAL;
     }
-    let der = match read_whole(fd, c"certificate", KEYS_DER_MAX) {
+    let der = match read_whole(fd, KEYS_DER_MAX) {
         Ok(der) => der,
         Err(err) => return err,
     };

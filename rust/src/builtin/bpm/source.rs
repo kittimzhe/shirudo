@@ -5,15 +5,15 @@
 //! /etc/shirudo/bpm/registries.d or held by the config image, and the
 //! tree it syncs.
 
-use core::ffi::{CStr, c_int};
+use core::ffi::c_int;
 use std::ffi::CString;
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, FromRawFd, IntoRawFd, OwnedFd};
 
 use super::{
     BPM_KEYS_DIR, DirStream, INDEX_REPOSITORY_NAME, REGISTRIES_DIR, Result, Stream, TREE_ETC_PATH,
     error, path, print, remove, status,
 };
-use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, EPERM};
+use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG};
 use crate::sys::libc::{O_DIRECTORY, O_RDONLY, PATH_MAX};
 use crate::text::{contains, cstr, name_has_suffix, strscpy, strsprintf};
 use crate::util::bpm_oci::{Client, MAX_DIGEST, MAX_ENDPOINT, MAX_NAME, name_ok};
@@ -21,7 +21,7 @@ use crate::util::bpm_package::{verify_cms, verify_cms_fd};
 use crate::util::bpm_source_config::{parse_source_line, parse_tree_line};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file};
 use crate::util::image_config::{self, REGISTRIES, TREE_CONF};
-use crate::util::io::check_trusted;
+use crate::util::io::open_trusted;
 use crate::util::json::JsonEmit;
 use crate::util::seal;
 
@@ -110,19 +110,6 @@ fn source_path(name: &[u8]) -> Result<CString> {
     path(&[REGISTRIES_DIR.as_bytes(), b"/", name, b".conf"])
 }
 
-/// What comes from the config image is authenticated content, and the
-/// host path it is named by in messages is not where it was read from;
-/// only a host file has an owner and mode to check.
-fn trusted(stream: &Stream, path: &CStr) -> Result {
-    if image_config::active() {
-        return Ok(());
-    }
-    match check_trusted(stream.as_fd(), path, false) {
-        0 => Ok(()),
-        _ => Err(-EPERM),
-    }
-}
-
 /// The registrations, from the config image when one is active.
 pub(super) fn registries() -> Result<DirStream> {
     if image_config::active() {
@@ -166,11 +153,10 @@ pub(super) fn load(name: &[u8]) -> Result<Source> {
             O_RDONLY,
         ))?
     } else {
-        Stream::open(&file)?
+        Stream::from_fd(open_trusted(&file, O_RDONLY)?.into_raw_fd())?
     };
     let mut s = Source::new();
 
-    trusted(&stream, &file)?;
     strscpy(&mut s.name, name).map_err(|_| -ENAMETOOLONG)?;
     stream.lines(|line| {
         status(parse_source_line(
@@ -365,14 +351,13 @@ pub(super) fn load_tree() -> Result<TreeConfig> {
     let mut stream = if image_config::active() {
         Stream::from_fd(image_config::open(TREE_CONF, O_RDONLY))?
     } else {
-        Stream::open(TREE_ETC_PATH)?
+        Stream::from_fd(open_trusted(TREE_ETC_PATH, O_RDONLY)?.into_raw_fd())?
     };
     let mut cfg = TreeConfig {
         endpoint: [0; MAX_ENDPOINT],
         reference: [0; MAX_DIGEST],
     };
 
-    trusted(&stream, TREE_ETC_PATH)?;
     stream
         .lines(|line| status(parse_tree_line(line, &mut cfg.endpoint, &mut cfg.reference)))
         .map_err(|_| -EINVAL)?;

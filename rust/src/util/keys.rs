@@ -10,24 +10,19 @@ use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use openssl::x509::X509;
 
-use crate::errno::{
-    E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, EPERM, text,
-};
-use crate::sys::libc::{
-    F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG, access, errno, faccessat,
-    open,
-};
+use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, text};
+use crate::sys::libc::{F_OK, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG, access, faccessat};
 use crate::text::name_has_suffix;
 use crate::util::crypto_openssl::{self, pubkey_digest, verify_detached_x509, x509_from_der};
 use crate::util::hex::encode;
 use crate::util::image_config;
-use crate::util::io::{check_trusted, dir_names, dir_names_at, open_beneath, read_whole, stat_fd};
+use crate::util::io::{dir_names, dir_names_at, open_beneath, open_trusted, read_whole, stat_fd};
 use crate::util::seal;
 
 /// `KEYS_MAX`: the most certificates a set holds.
@@ -111,7 +106,7 @@ fn room_for(len: usize) -> Result<Vec<u8>, c_int> {
 /// The certificate open at `fd`, whole: -EINVAL for an empty one, or
 /// what read_whole() refused it with.
 pub(crate) fn read_der_fd(fd: BorrowedFd<'_>) -> Result<Vec<u8>, c_int> {
-    let der = read_whole(fd, c"certificate", DER_MAX)?;
+    let der = read_whole(fd, DER_MAX)?;
 
     if der.is_empty() {
         return Err(-EINVAL);
@@ -129,18 +124,8 @@ fn read_der_at(dir: BorrowedFd<'_>, name: &CStr) -> Result<Vec<u8>, c_int> {
 /// -EPERM for one check_trusted() refuses, -EIO for a short read, or
 /// -errno.
 pub(crate) fn read_der(path: &CStr) -> Result<Vec<u8>, c_int> {
-    // SAFETY: a C string, and flags.
-    let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-
-    if fd < 0 {
-        return Err(-errno());
-    }
-    // SAFETY: the fd open() just gave, owned from here.
-    let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let file = File::from(open_trusted(path, O_RDONLY)?);
     let size = der_size(&file)?;
-    if check_trusted(file.as_fd(), path, false) != 0 {
-        return Err(-EPERM);
-    }
     let mut der = room_for(size)?;
 
     der.resize(size, 0);

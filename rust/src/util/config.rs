@@ -7,17 +7,15 @@
 
 use core::ffi::{CStr, c_int};
 use core::mem::MaybeUninit;
-use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::{AsFd, BorrowedFd, IntoRawFd};
-use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{EINVAL, EIO, ENOENT, EPERM};
-use crate::sys::libc::{close, env, errno, explicit_bzero, scrub};
+use crate::sys::libc::{O_RDONLY, close, env, errno, explicit_bzero, scrub};
 use crate::text::{dns_name_valid, parse_u64, strscpy, trim_blanks};
 use crate::util::hex::hex_decode_max;
-use crate::util::io::check_trusted;
+use crate::util::io::{check_secret, check_trusted, open_trusted};
 use crate::util::json::MAX_BYTES;
 
 const OWNER_AUTH_MAX: usize = 256;
@@ -343,9 +341,6 @@ fn parse(cfg: &mut Config, mut f: File, path: &CStr) -> c_int {
     const MAX: usize = MAP_EXPORT_PATH_MAX + 127;
     let mut ret = 0;
 
-    if check_trusted(f.as_fd(), path, false) != 0 {
-        return -EPERM;
-    }
     let mut text = Vec::new();
     let read = f.read_to_end(&mut text);
     // What a failed read gave, up to its last whole line, as getline()
@@ -375,7 +370,7 @@ fn parse(cfg: &mut Config, mut f: File, path: &CStr) -> c_int {
         unreadable(path, ret);
     }
     // The TPM owner's authorization is for no other user's eyes.
-    if cfg.tpm_owner_auth_len != 0 && check_trusted(f.as_fd(), path, true) != 0 {
+    if cfg.tpm_owner_auth_len != 0 && check_secret(f.as_fd(), path) != 0 {
         scrub(&mut cfg.tpm_owner_auth);
         cfg.tpm_owner_auth_len = 0;
         ret = -EPERM;
@@ -424,11 +419,11 @@ fn finish(cfg: &mut Config, ret: c_int) -> c_int {
 /// no error.
 pub(crate) fn load_path(cfg: &mut Config, path: &CStr) -> c_int {
     *cfg = Config::defaults();
-    let ret = match File::open(OsStr::from_bytes(path.to_bytes())) {
-        Ok(f) => parse(cfg, f, path),
+    let ret = match open_trusted(path, O_RDONLY) {
+        Ok(fd) => parse(cfg, File::from(fd), path),
         // The environment's overrides still apply.
-        Err(e) if e.raw_os_error() == Some(ENOENT) => 0,
-        Err(e) => -e.raw_os_error().unwrap_or(EIO),
+        Err(ret) if ret == -ENOENT => 0,
+        Err(ret) => ret,
     };
     finish(cfg, ret)
 }
@@ -468,7 +463,11 @@ pub(crate) fn load_fd(cfg: &mut Config, fd: BorrowedFd<'_>, label: &CStr) -> c_i
     if let Err(e) = f.seek(SeekFrom::Start(0)) {
         return -e.raw_os_error().unwrap_or(EIO);
     }
-    let ret = parse(cfg, f, label);
+    let ret = if check_trusted(f.as_fd(), label) != 0 {
+        -EPERM
+    } else {
+        parse(cfg, f, label)
+    };
     finish(cfg, ret)
 }
 

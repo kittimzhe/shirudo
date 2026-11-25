@@ -21,6 +21,7 @@ pub const EFAULT: c_int = 14;
 pub const ENOTBLK: c_int = 15;
 pub const EBUSY: c_int = 16;
 pub const ENOTDIR: c_int = 20;
+pub const EISDIR: c_int = 21;
 pub const EINVAL: c_int = 22;
 pub const EFBIG: c_int = 27;
 pub const ENOSPC: c_int = 28;
