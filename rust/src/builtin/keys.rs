@@ -224,6 +224,21 @@ fn spki_fpr<T: HasPublic>(pkey: &PKeyRef<T>) -> Option<[u8; 32]> {
     sha256(&der).map_err(|_| complain(c"EVP_Digest")).ok()
 }
 
+/// Format a provider name, with a bit count for classical keys, into
+/// the 63 bytes available for display.
+fn format_algorithm(name: &[u8], bits: Option<u32>) -> Vec<u8> {
+    let algorithm = match bits {
+        Some(bits) => [name, b"-", bits.to_string().as_bytes()].concat(),
+        None => name.to_vec(),
+    };
+
+    if algorithm.len() < 64 {
+        algorithm
+    } else {
+        b"?".to_vec()
+    }
+}
+
 /// "RSA-2048" or "EC-256" for the classical families, else the
 /// provider's own name, "ML-DSA-87", whose parameter set says what a bit
 /// count would.
@@ -232,11 +247,9 @@ fn pkey_algorithm<T: HasPublic>(pkey: &PKeyRef<T>) -> Vec<u8> {
     let name = name.as_deref().map_or(&b"unknown"[..], CStr::to_bytes);
     // SAFETY: the key.
     let id = unsafe { EVP_PKEY_get_base_id(pkey.as_ptr()) };
+    let bits = (id == EVP_PKEY_RSA || id == EVP_PKEY_EC).then(|| pkey.bits());
 
-    if id == EVP_PKEY_RSA || id == EVP_PKEY_EC {
-        return [name, b"-", pkey.bits().to_string().as_bytes()].concat();
-    }
-    name[..name.len().min(63)].to_vec()
+    format_algorithm(name, bits)
 }
 
 fn print_fpr(label: &[u8], fpr: &[u8; 32]) {
@@ -1306,5 +1319,22 @@ pub(crate) fn cmd_keys(args: &[&CStr]) -> c_int {
             1
         }
         _ => super::build::forward(c"keys vouch", &[c"keys", c"vouch"], &args[2..]),
+    }
+}
+
+#[cfg(test)]
+mod algorithm_tests {
+    use super::format_algorithm;
+
+    #[test]
+    fn algorithm_that_fits_is_complete() {
+        assert_eq!(format_algorithm(b"RSA", Some(2048)), b"RSA-2048");
+        assert_eq!(format_algorithm(&[b'x'; 63], None), &[b'x'; 63]);
+    }
+
+    #[test]
+    fn algorithm_that_does_not_fit_is_unknown() {
+        assert_eq!(format_algorithm(&[b'x'; 64], None), b"?");
+        assert_eq!(format_algorithm(&[b'x'; 63], Some(1)), b"?");
     }
 }
